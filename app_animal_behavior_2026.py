@@ -430,6 +430,19 @@ def _find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
     return None
 
 
+
+def _find_col_prefer_candidates(cols: List[str], candidates: List[str]) -> Optional[str]:
+    """Find the first matching column by *candidate priority* (cand-first), not by sheet column order.
+    This matters when multiple speaker-like columns exist (e.g., 講者 vs 主持人).
+    """
+    for cand in candidates:
+        for c in cols:
+            if not isinstance(c, str):
+                continue
+            if cand in c:
+                return c
+    return None
+
 def _join_nonempty(parts: List[Optional[str]], sep: str = " ") -> Optional[str]:
     xs = [p.strip() for p in parts if p and str(p).strip()]
     if not xs:
@@ -663,7 +676,7 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
             speaker_candidates = ["講者", "作者姓名", "主持人"]
         else:
             speaker_candidates = ["作者姓名", "講者", "主持人"]
-        col_speaker = _find_col(cols, speaker_candidates)
+        col_speaker = _find_col_prefer_candidates(cols, speaker_candidates)
 
         col_aff = _find_col(cols, ["講者單位", "單位"])
 
