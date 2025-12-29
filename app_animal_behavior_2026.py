@@ -227,7 +227,7 @@ def get_oauth_config() -> Optional[Dict[str, str]]:
 
 
 def build_flow(config: Dict[str, str]) -> "Flow":
-    scopes = ["openid", "email", "profile"]
+    scopes = ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"]  # keep scopes stable
     client_config = {
         "web": {
             "client_id": config["client_id"],
