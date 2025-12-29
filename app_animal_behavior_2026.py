@@ -999,19 +999,17 @@ def main():
 
     st.title(APP_TITLE)
 
-    # --- Sidebar: login status ---
-    with st.sidebar:
-        st.markdown("## 狀態保存")
-        user = auth_ui_sidebar()
+    # --- Auth panel (visible on mobile too) ---
+    with st.expander("狀態保存（Google 登入）", expanded=False):
+        user = auth_ui_sidebar()  # renders login link if not yet authenticated
 
         err = st.session_state.get("auth_error")
         if err:
             st.error(err)
 
         if user is None:
-            st.caption("未登入：核心選擇只會暫存於本次瀏覽（跳掉/重開可能消失）")
-            if not get_oauth_config():
-                st.warning("尚未設定 Google OAuth secrets；目前只能匿名模式。")
+            if get_oauth_config() is None:
+                st.warning("尚未設定 Google OAuth secrets；目前只能匿名模式（重整/跳掉可能會遺失勾選）。")
             if not _GOOGLE_LIBS_OK:
                 st.warning("缺少 google-auth / google-auth-oauthlib，無法啟用登入。")
         else:
@@ -1027,7 +1025,7 @@ def main():
         st.markdown("---")
         st.caption("🔒 登入僅用於記住你勾選的議程，不讀 Gmail、不改 Google Calendar。")
 
-    # --- Persistent state manager ---
+# --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
     st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode", False)))
     st.session_state.setdefault("selected_keys", _as_set(mgr.get("selected_keys", [])))
