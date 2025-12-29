@@ -1,4 +1,4 @@
-# app_animal_behavior_2026_oauth_A_full_v1.py
+# app_animal_behavior_2026_oauth_A_full_v2_2_mobile_login_fix_speaker_pref.py
 # ------------------------------------------------------------
 # 版本變更說明（覆蓋版｜方案A：Google 登入 + 暫存個人行事曆選擇）
 # 1) ✅ 保留你現有 Excel 解析（大會議程/分會場/海報）、衝突規則、.ics 匯出、原始分頁 tabs。
@@ -11,6 +11,7 @@
 #    - confirm_delete_marked（刪除二次確認 bool）
 #    - force_mobile_mode（Mobile mode toggle）
 #    ※ 其他 UI widget（例如 checkbox 的勾選）仍由 Streamlit 本身 session 管理。
+# 4) ✅ Excel 解析微調：在「S101國家公園」「E102林保署」分頁，報告者欄位優先抓「講者」（避免被作者姓名欄覆蓋）。
 #
 # ⚠️ Streamlit Cloud 注意
 # - 本檔預設用 SQLite（user_state.db）保存；在 Streamlit Cloud 有機率在重啟/重新部署後被重置。
@@ -33,7 +34,7 @@
 #
 # ------------------------------------------------------------
 # Usage:
-#   streamlit run app_animal_behavior_2026_oauth_A_full_v1.py
+#   streamlit run app_animal_behavior_2026_oauth_A_full_v2_2_mobile_login_fix_speaker_pref.py
 #
 from __future__ import annotations
 
@@ -657,7 +658,13 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         col_time = _find_col(cols, ["時間"])
         col_code = _find_col(cols, ["編號"])
         col_report = _find_col(cols, ["報告時間"])
-        col_speaker = _find_col(cols, ["作者姓名", "講者", "主持人"])
+                # Speaker column: for some sheets we prefer '講者' over '作者姓名'
+        if str(sheet_name).strip() in ("S101國家公園", "E102林保署"):
+            speaker_candidates = ["講者", "作者姓名", "主持人"]
+        else:
+            speaker_candidates = ["作者姓名", "講者", "主持人"]
+        col_speaker = _find_col(cols, speaker_candidates)
+
         col_aff = _find_col(cols, ["講者單位", "單位"])
 
         title_candidates = [
