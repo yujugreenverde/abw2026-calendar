@@ -1,15 +1,13 @@
 # app_animal_behavior_2026.py
 # ------------------------------------------------------------
-# 版本變更說明（B1：格狀行事曆點選=勾選刪除；Mobile-first 版面）
-# 1) ✅ 保留你現有的 Excel 解析邏輯（大會議程/分會場/海報）、衝突規則、.ics 匯出、原始分頁 tabs。
-# 2) 📱 Mobile-first：手機改用「上方控制面板 expander」，桌機維持 sidebar。
-# 3) 📱 Mobile 搜尋結果改為「卡片式清單 + 加入/移除」；桌機維持 data_editor。
-# 4) 🗓️（B1）新增「已選行程：格狀行事曆視圖」
-#    - 在行事曆上點事件 => 事件加入/移出「待刪除清單」
-#    - 事件標題前加上 🗑️ 表示已勾選待刪除
-#    - 下方提供「二次確認」後批次刪除（從 selected_keys 移除）
-#    - ⚠️ 衝突事件（非海報）在行事曆標題前加 ⚠️（海報不標衝突）
-# 5) 若環境沒有 streamlit-calendar：自動 fallback 成「待刪除清單（無格狀）」仍可刪除，不會整個壞。
+# 版本變更說明（無外掛版：行事曆內勾選刪除；Mobile-first）
+# 1) ✅ 保留你現有 Excel 解析（大會議程/分會場/海報）、衝突規則、.ics 匯出、原始分頁 tabs。
+# 2) 📱 Mobile-first：手機用「上方控制面板 expander」，桌機維持 sidebar（可用 Mobile mode 切換測）。
+# 3) 📱 Mobile 搜尋結果改為「卡片式加入/移除」；桌機維持 data_editor。
+# 4) 🗑️ 行事曆內勾選刪除（不靠 streamlit-calendar）：
+#    - 在 D1/D2 已選清單內，每筆事件都有 checkbox（勾選=加入待刪除）
+#    - 待刪除清單提供「二次確認」後批次刪除（從 selected_keys 移除）
+# 5) ✅ 修正：當搜尋結果 <=10 筆時，不顯示 slider，避免 min_value==max_value 錯誤。
 #
 # Usage:
 #   streamlit run app_animal_behavior_2026.py
@@ -47,8 +45,6 @@ st.markdown(
   .stButton button, .stDownloadButton button { padding: 0.65rem 0.9rem; font-size: 1rem; }
   .stToggle { transform: scale(1.05); transform-origin: left center; }
 }
-/* Calendar event text visibility (best effort; depends on component CSS) */
-.fc .fc-event-title, .fc .fc-event-time { line-height: 1.25 !important; }
 </style>
     """,
     unsafe_allow_html=True,
@@ -210,7 +206,6 @@ def load_excel_all_sheets(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
 def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     master: List[Dict[str, object]] = []
 
-    # ---- 大會議程（主表）----
     if "大會議程" in sheets:
         df = sheets["大會議程"].copy()
         cur_day: Optional[str] = None
@@ -260,12 +255,10 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
                     )
                 )
 
-    # ---- 其他 sheets ----
     for sheet_name, df0 in sheets.items():
         if sheet_name == "大會議程":
             continue
 
-        # ---- 海報 ----
         if str(sheet_name).strip() == "海報":
             dfp = df0.copy()
             cols_p = [str(c) for c in dfp.columns]
@@ -332,7 +325,6 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
                 )
             continue
 
-        # ---- 一般分會場 ----
         df = df0.copy()
 
         def _infer_default_day_from_sheet(sheet: str, df_: pd.DataFrame) -> Optional[str]:
@@ -518,10 +510,6 @@ def events_from_selected(df_all: pd.DataFrame, selected_keys: Set[str]) -> pd.Da
 
 
 def add_conflict_flags(selected_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    同日時間重疊 => conflict=True。
-    但：kind == 'poster' 的事件不參與衝突偵測（也不會被標紅）。
-    """
     if selected_df is None or len(selected_df) == 0:
         return selected_df
 
@@ -706,143 +694,19 @@ def build_ics(events: pd.DataFrame, cal_name: str = "Animal Behavior Workshop 20
 
 
 # ----------------------------
-# Calendar (streamlit-calendar optional)
-# ----------------------------
-def _try_get_calendar():
-    try:
-        from streamlit_calendar import calendar
-        return calendar
-    except Exception:
-        return None
-
-
-def _event_title_for_calendar(r: pd.Series, marked_for_delete: Set[str]) -> str:
-    # 核心顯示：地點｜編號（你之前喜好）
-    where = str(r.get("where") or r.get("room") or "").strip()
-    code = str(r.get("code") or "").strip()
-    base = f"{where}｜{code}" if (where and code) else (code or where or "Event")
-
-    # 衝突標記（海報不標）
-    conflict = bool(r.get("conflict")) if "conflict" in r.index else False
-    kind = str(r.get("kind") or "")
-    prefix = ""
-    if kind != "poster" and conflict:
-        prefix += "⚠️ "
-
-    # 待刪除標記
-    if str(r.get("key")) in marked_for_delete:
-        prefix = "🗑️ " + prefix
-
-    return prefix + base
-
-
-def _selected_to_calendar_events(selected_df: pd.DataFrame, marked_for_delete: Set[str]) -> List[Dict]:
-    events: List[Dict] = []
-    if selected_df is None or len(selected_df) == 0:
-        return events
-    for _, r in selected_df.iterrows():
-        key = str(r.get("key"))
-        events.append(
-            dict(
-                id=key,
-                title=_event_title_for_calendar(r, marked_for_delete),
-                start=pd.to_datetime(r["start_dt"]).isoformat(),
-                end=pd.to_datetime(r["end_dt"]).isoformat(),
-                extendedProps=dict(
-                    key=key,
-                    kind=str(r.get("kind") or ""),
-                    title_full=str(r.get("title") or ""),
-                    speaker=str(r.get("speaker") or ""),
-                    room=str(r.get("room") or ""),
-                    where=str(r.get("where") or ""),
-                    code=str(r.get("code") or ""),
-                ),
-            )
-        )
-    return events
-
-
-def _render_calendar_block(
-    selected_df: pd.DataFrame,
-    day_view: str,
-    marked_for_delete: Set[str],
-    height: int = 650,
-) -> Tuple[Optional[str], Dict]:
-    """
-    Returns (clicked_event_id, raw_state)
-    """
-    cal = _try_get_calendar()
-    if cal is None:
-        return None, {"fallback": True}
-
-    # filter by day_view
-    if day_view in ("D1", "D2"):
-        sdf = selected_df[selected_df["day"] == day_view].copy()
-        init_date = DATE_MAP[day_view]
-    else:
-        sdf = selected_df.copy()
-        init_date = pd.to_datetime(sdf["start_dt"]).min().date() if len(sdf) else DATE_MAP["D1"]
-
-    events = _selected_to_calendar_events(sdf, marked_for_delete)
-
-    options = {
-        "initialView": "timeGridDay" if day_view in ("D1", "D2") else "timeGridWeek",
-        "initialDate": init_date.isoformat(),
-        "headerToolbar": {
-            "left": "prev,next today",
-            "center": "title",
-            "right": "timeGridDay,timeGridWeek,listWeek",
-        },
-        "height": height,
-        "slotMinTime": "07:00:00",
-        "slotMaxTime": "21:30:00",
-        "allDaySlot": False,
-        "nowIndicator": True,
-        "eventDisplay": "block",
-        "eventTimeFormat": {"hour": "2-digit", "minute": "2-digit", "hour12": False},
-        "expandRows": True,
-        "slotEventOverlap": False,
-        "eventMaxStack": 99,
-    }
-
-    state = cal(events=events, options=options, key=f"calendar_selected_{day_view}")
-    clicked_id: Optional[str] = None
-
-    # Try parse click payload (streamlit-calendar versions differ)
-    if isinstance(state, dict):
-        payload = None
-        for k in ("eventClick", "event_click", "eventClickInfo"):
-            if k in state and state[k]:
-                payload = state[k]
-                break
-        if isinstance(payload, dict):
-            if "event" in payload and isinstance(payload["event"], dict):
-                clicked_id = payload["event"].get("id")
-            else:
-                clicked_id = payload.get("id")
-
-    return clicked_id, state
-
-
-# ----------------------------
-# Mobile detection (manual toggle; Streamlit can't reliably auto-detect viewport)
-# ----------------------------
-if "force_mobile_mode" not in st.session_state:
-    st.session_state.force_mobile_mode = False
-
-# ----------------------------
 # UI
 # ----------------------------
 st.title(APP_TITLE)
 
-# top-right: mobile toggle
+if "force_mobile_mode" not in st.session_state:
+    st.session_state.force_mobile_mode = False
+
 tcol1, tcol2 = st.columns([0.75, 0.25])
 with tcol2:
     st.session_state.force_mobile_mode = st.toggle("Mobile mode", value=st.session_state.force_mobile_mode)
 
 is_mobile = bool(st.session_state.force_mobile_mode)
 
-# sidebar controls (desktop) or top expander (mobile)
 uploaded = None
 use_default = True
 query = ""
@@ -875,7 +739,6 @@ else:
         include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
         days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
 
-# load file bytes
 file_bytes: Optional[bytes] = None
 if uploaded is not None:
     file_bytes = uploaded.getvalue()
@@ -893,9 +756,7 @@ if not file_bytes:
 sheets = load_excel_all_sheets(file_bytes)
 df_all = build_master_df(sheets)
 
-# rooms selector depends on df_all
 all_rooms = sorted(df_all["room"].dropna().unique().tolist())
-
 if is_mobile:
     with st.expander("教室/分會場篩選（可選）", expanded=False):
         rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
@@ -903,7 +764,6 @@ else:
     with st.sidebar:
         rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
 
-# session state
 if "selected_keys" not in st.session_state:
     st.session_state["selected_keys"] = set()
 if "marked_delete_keys" not in st.session_state:
@@ -914,8 +774,7 @@ if "confirm_delete_marked" not in st.session_state:
 selected_keys: Set[str] = set(st.session_state["selected_keys"])
 marked_delete: Set[str] = set(st.session_state["marked_delete_keys"])
 
-selected_df = events_from_selected(df_all, selected_keys)
-selected_df = add_conflict_flags(selected_df)
+selected_df = add_conflict_flags(events_from_selected(df_all, selected_keys))
 
 df_hit = filter_events(df_all, query=query, days=days, rooms=rooms, include_main=include_main)
 df_hit2 = mark_conflict_with_selected(df_hit, selected_df)
@@ -927,7 +786,6 @@ st.subheader("1) 搜尋結果（加入／移除個人行事曆）")
 st.caption(f"符合筆數：{len(df_hit2)}（⚠️ 表示會與你已選的『非海報』行程時間重疊；海報不標衝突）")
 
 if not is_mobile:
-    # desktop: data_editor (your original)
     picker_df = df_for_picker(df_hit2, selected_keys, show_conflict_with_selected=True)
 
     edited = st.data_editor(
@@ -957,6 +815,7 @@ if not is_mobile:
             new_selected.add(k)
         else:
             new_selected.discard(k)
+
     selected_keys = new_selected
     st.session_state["selected_keys"] = selected_keys
 
@@ -975,26 +834,18 @@ if not is_mobile:
         st.caption("提示：你可以先用關鍵字或教室篩選縮小範圍，再全選。")
 
 else:
-    # mobile: card list + add/remove
-    # show first N with slider
     n_total = int(len(df_hit2))
-
-    if n_total <= 10:
-        show_n = n_total
+    if n_total == 0:
+        st.warning("沒有符合的結果：請放寬關鍵字/日期/教室篩選。")
+        df_show = df_hit2
+    elif n_total <= 10:
         st.caption(f"目前結果 {n_total} 筆（少於 10 筆，不顯示筆數滑桿）")
+        df_show = df_hit2
     else:
         max_n = min(200, n_total)
         default_n = min(30, max_n)
-        show_n = st.slider(
-            "顯示筆數",
-            min_value=10,
-            max_value=max_n,
-            value=default_n,
-            step=10,
-        )
-    
-    df_show = df_hit2.head(show_n).copy()
-
+        show_n = st.slider("顯示筆數", min_value=10, max_value=max_n, value=default_n, step=10)
+        df_show = df_hit2.head(show_n).copy()
 
     for _, r in df_show.iterrows():
         k = str(r["key"])
@@ -1005,11 +856,11 @@ else:
         with st.container(border=True):
             top = st.columns([0.74, 0.26])
             with top[0]:
-                line1 = f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**"
-                st.markdown(line1)
+                st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**")
                 code = str(r.get("code") or "").strip()
                 title = str(r.get("title") or "").strip()
                 who = str(r.get("speaker") or "").strip()
+
                 if code:
                     st.markdown(f"{conflict_flag} **{code}**  {title}")
                 else:
@@ -1034,14 +885,11 @@ else:
                         st.session_state["selected_keys"] = selected_keys
                         st.rerun()
 
-    st.caption("（手機模式下建議先用關鍵字/日期/教室縮小後再加入）")
-
 # recompute selected_df after updates
-selected_df = events_from_selected(df_all, set(st.session_state["selected_keys"]))
-selected_df = add_conflict_flags(selected_df)
+selected_df = add_conflict_flags(events_from_selected(df_all, set(st.session_state["selected_keys"])))
 
 # ----------------------------
-# 2) 個人化行事曆（兩天） + B1 行事曆點選刪除
+# 2) 個人化行事曆（兩天） + 行事曆內勾選刪除（無外掛）
 # ----------------------------
 st.markdown("---")
 st.subheader("2) 個人化行事曆（兩天）")
@@ -1058,35 +906,51 @@ m3.metric("衝突場次（不含海報）", conf_n)
 if len(selected_df) == 0:
     st.info("尚未選取任何議程。")
 else:
-    st.markdown("### 🗓️ 行事曆視圖（點事件 = 勾選待刪除）")
-    st.caption("已勾選待刪除的事件會顯示 🗑️；按下方按鈕可批次刪除（會從你的已選清單移除）。")
+    st.markdown("### 🗑️ 在行事曆清單中勾選刪除（勾選後會進待刪除清單）")
+    st.caption("海報不計入衝突；衝突事件（非海報）會在清單中標示 ⚠️。")
 
-    cal_day_view = st.radio("行事曆顯示", options=["All", "D1", "D2"], horizontal=True, index=0)
+    # helper: compact row label
+    def _event_label(r: pd.Series) -> str:
+        where = str(r.get("where") or r.get("room") or "").strip()
+        code = str(r.get("code") or "").strip()
+        title = str(r.get("title") or "").strip()
+        s = f"{r['start']}–{r['end']}｜{where}"
+        if code:
+            s += f"｜{code}"
+        if title:
+            s += f"｜{title[:40]}"
+            if len(title) > 40:
+                s += "…"
+        kind = str(r.get("kind") or "")
+        conflict = bool(r.get("conflict")) if (kind != "poster") else False
+        prefix = "⚠️ " if conflict else ""
+        return prefix + s
 
-    clicked_id, cal_state = _render_calendar_block(
-        selected_df=selected_df,
-        day_view=cal_day_view,
-        marked_for_delete=set(st.session_state["marked_delete_keys"]),
-        height=560 if is_mobile else 720,
-    )
+    # D1/D2 blocks with checkboxes
+    for day, label in [("D1", "D1｜2026-01-26"), ("D2", "D2｜2026-01-27")]:
+        sub = selected_df[selected_df["day"] == day].copy().sort_values(["start_dt", "room", "code"])
+        expand_default = bool((sub["conflict"].sum() > 0)) if len(sub) else False
 
-    if isinstance(cal_state, dict) and cal_state.get("fallback"):
-        st.warning("⚠️ 目前環境沒有 streamlit-calendar，因此無法顯示格狀行事曆；你仍可用下方『待刪除清單』勾選刪除。")
+        with st.expander(f"{label}（{len(sub)} 場）", expanded=expand_default):
+            if len(sub) == 0:
+                st.caption("（此日尚未選取）")
+                continue
 
-    # toggle mark delete by calendar click
-    if clicked_id:
-        md = set(st.session_state["marked_delete_keys"])
-        if clicked_id in md:
-            md.discard(clicked_id)
-        else:
-            md.add(clicked_id)
-        st.session_state["marked_delete_keys"] = md
-        st.session_state["confirm_delete_marked"] = False
-        st.rerun()
+            # render as checkbox list
+            for _, r in sub.iterrows():
+                k = str(r["key"])
+                checked = (k in st.session_state["marked_delete_keys"])
+                new_checked = st.checkbox(_event_label(r), value=checked, key=f"delchk_{day}_{k}")
+                if new_checked and (k not in st.session_state["marked_delete_keys"]):
+                    st.session_state["marked_delete_keys"].add(k)
+                    st.session_state["confirm_delete_marked"] = False
+                if (not new_checked) and (k in st.session_state["marked_delete_keys"]):
+                    st.session_state["marked_delete_keys"].discard(k)
+                    st.session_state["confirm_delete_marked"] = False
 
-    # Marked-for-delete panel
+    # Marked-for-delete summary
     st.divider()
-    st.subheader("🗑️ 待刪除清單（由行事曆點選加入）")
+    st.subheader("🗑️ 待刪除清單（已勾選）")
 
     marked_delete = set(st.session_state["marked_delete_keys"])
     marked_df = selected_df[selected_df["key"].isin(list(marked_delete))].copy().sort_values(["start_dt", "room"])
@@ -1094,29 +958,18 @@ else:
     if len(marked_df) == 0:
         st.caption("（目前沒有勾選任何待刪除行程）")
     else:
-        # compact list (mobile-friendly)
         for _, r in marked_df.iterrows():
-            k = str(r["key"])
             with st.container(border=True):
-                cL, cR = st.columns([0.78, 0.22])
-                with cL:
-                    st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**")
-                    code = str(r.get("code") or "").strip()
-                    title = str(r.get("title") or "").strip()
-                    if code:
-                        st.markdown(f"**{code}**  {title}")
-                    else:
-                        st.markdown(title)
-                    who = str(r.get("speaker") or "").strip()
-                    if who:
-                        st.caption(who)
-                with cR:
-                    if st.button("取消", key=f"unmark_{k}"):
-                        md = set(st.session_state["marked_delete_keys"])
-                        md.discard(k)
-                        st.session_state["marked_delete_keys"] = md
-                        st.session_state["confirm_delete_marked"] = False
-                        st.rerun()
+                st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**")
+                code = str(r.get("code") or "").strip()
+                title = str(r.get("title") or "").strip()
+                if code:
+                    st.markdown(f"**{code}**  {title}")
+                else:
+                    st.markdown(title)
+                who = str(r.get("speaker") or "").strip()
+                if who:
+                    st.caption(who)
 
         st.divider()
         if not st.session_state["confirm_delete_marked"]:
@@ -1137,43 +990,6 @@ else:
             if b2.button("取消"):
                 st.session_state["confirm_delete_marked"] = False
                 st.rerun()
-
-    # ---- 原本 D1/D2 表格（保留：手機用 expander）----
-    def _style_conflicts(df_view: pd.DataFrame) -> pd.io.formats.style.Styler:
-        def row_style(r):
-            if str(r.get("衝突", "")).strip() == "⚠️":
-                return ["background-color: #ffe5e5; font-weight: 600;" for _ in r]
-            return ["" for _ in r]
-        return df_view.style.apply(row_style, axis=1)
-
-    st.markdown("### 📋 已選清單（D1 / D2）")
-
-    for day, label in [("D1", "D1｜2026-01-26"), ("D2", "D2｜2026-01-27")]:
-        sub = selected_df[selected_df["day"] == day].copy()
-        expand_default = bool((sub["conflict"].sum() > 0)) if len(sub) else False
-
-        with st.expander(f"{label}（{len(sub)} 場）", expanded=expand_default):
-            if len(sub) == 0:
-                st.caption("（此日尚未選取）")
-                continue
-
-            view = sub[["start", "end", "room", "code", "title", "speaker", "session", "conflict", "kind"]].copy()
-            view = view.rename(
-                columns={
-                    "start": "開始",
-                    "end": "結束",
-                    "room": "教室/類別",
-                    "code": "編號",
-                    "title": "主題",
-                    "speaker": "講者/作者",
-                    "session": "主題領域",
-                    "conflict": "衝突",
-                    "kind": "類型",
-                }
-            )
-            view["衝突"] = view.apply(lambda r: ("⚠️" if bool(r["衝突"]) else ""), axis=1)
-
-            st.dataframe(_style_conflicts(view.drop(columns=["類型"])), use_container_width=True, hide_index=True)
 
     # ---- ics 匯出 ----
     ics_text = build_ics(selected_df)
