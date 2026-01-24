@@ -1,41 +1,39 @@
-# app_animal_behavior_2026_oauth_A_full_v2_2_mobile_login_fix_speaker_pref.py
+# app_animal_behavior_2026_oauth_A_full_v2_3_mvp_abstract_expand_pdf_jump.py
 # ------------------------------------------------------------
-# 版本變更說明（覆蓋版｜方案A：Google 登入 + 暫存個人行事曆選擇）
-# 1) ✅ 保留你現有 Excel 解析（大會議程/分會場/海報）、衝突規則、.ics 匯出、原始分頁 tabs。
-# 2) ✅ 加入 Google OAuth 登入（只要 openid / email / profile）：
-#    - 目的：用 Google 身分（sub）當 user_id，保存「已選行程/待刪除勾選/刪除確認」等狀態
-#    - 不會讀 Gmail 信件、不會動 Google Calendar
-# 3) ✅ 把原本存在 st.session_state 的核心狀態改為「可持久化」：
-#    - selected_keys（已選行程 key set）
-#    - marked_delete_keys（待刪除 key set）
-#    - confirm_delete_marked（刪除二次確認 bool）
-#    - force_mobile_mode（Mobile mode toggle）
-#    ※ 其他 UI widget（例如 checkbox 的勾選）仍由 Streamlit 本身 session 管理。
-# 4) ✅ Excel 解析微調：在「S101國家公園」「E102林保署」分頁，報告者欄位優先抓「講者」（避免被作者姓名欄覆蓋）。
+# 版本變更說明（覆蓋版｜v2.3｜MVP：展開摘要＋PDF跳頁）
+# 1) ✅ 保留你現有 Excel 解析（大會議程/分會場/海報）、衝突規則、.ics 匯出、原始分頁 tabs、Google OAuth / SQLite 狀態保存。
+# 2) ✅ 新增「摘要索引」支援（MVP）：
+#    - 可上傳摘要索引 CSV / Excel（或把「摘要索引」分頁放在同一支 Excel 內）
+#    - 以 code（優先）或 key 對應每筆議程的 abstract_text / abstract_page
+# 3) ✅ 新增「PDF 摘要集」顯示（MVP）：
+#    - 支援：上傳 PDF（內嵌顯示）或填入 PDF URL（iframe 顯示）
+#    - 搜尋結果：每筆可「展開摘要」＋「跳到 PDF 指定頁」
+#    - Desktop：保留 data_editor 選取；另提供「結果詳情（可展開摘要/跳頁）」選擇器（避免在 data_editor 內做困難的逐列按鈕）
 #
-# ⚠️ Streamlit Cloud 注意
+# ✅ MVP 定義：
+# - 不做 OCR、不從 PDF 解析摘要內容（摘要文字必須來自索引檔）
+# - 展開摘要 = 顯示索引中的 abstract_text
+# - 跳頁 = 更新 PDF iframe 的 page
+#
+# ------------------------------------------------------------
+# 摘要索引檔格式（建議）
+# 你可以用 CSV 或 Excel（第一個分頁）：
+# - code: (可空) 例如 S101-03 / PA12 / 等
+# - key:  (可空) 對應本工具 mdf["key"]（若沒有 code 就用 key）
+# - page: (可空) PDF頁碼（整數）
+# - abstract_text: 摘要文字（可空）
+#
+# 對應規則：
+# 1) 若該議程有 code 且索引中有同 code → 使用該筆
+# 2) 否則若索引中有同 key → 使用該筆
+# 3) 否則顯示「（尚無摘要索引）」；PDF 仍可用手動頁碼跳頁
+#
+# ------------------------------------------------------------
+# Streamlit Cloud 注意
 # - 本檔預設用 SQLite（user_state.db）保存；在 Streamlit Cloud 有機率在重啟/重新部署後被重置。
 # - 若你要「真正跨重啟仍保留」，請把 db_save_state/db_load_state 換成 Supabase/Postgres/Firebase。
 #
 # ------------------------------------------------------------
-# 你需要做的設定（一次性）：
-# A) Google Cloud Console 建 OAuth Client（Web application）
-#    Authorized redirect URI：設成你的 app URL（例：https://abw2026-xxx.streamlit.app/）
-# B) 在 Streamlit Secrets 放：
-#    [google_oauth]
-#    client_id="..."
-#    client_secret="..."
-#    redirect_uri="https://你的app網址/"   # 建議就是 app 根目錄（含尾斜線）
-#    cookie_secret="一段隨機長字串，用於簽 state"
-#
-# C) requirements.txt（或 Streamlit Cloud packages）加入：
-#    google-auth
-#    google-auth-oauthlib
-#
-# ------------------------------------------------------------
-# Usage:
-#   streamlit run app_animal_behavior_2026_oauth_A_full_v2_2_mobile_login_fix_speaker_pref.py
-#
 from __future__ import annotations
 
 import os
@@ -53,7 +51,7 @@ from typing import Dict, Tuple, Optional, List, Set, Any
 import pandas as pd
 import streamlit as st
 
-APP_TITLE = "動物行為研討會 2026｜議程搜尋＋個人化行事曆"
+APP_TITLE = "2026 動物行為暨生態研討會｜議程搜尋＋個人化行事曆"
 DEFAULT_EXCEL_PATH = "2026 動行議程.xlsx"
 
 DATE_MAP = {
@@ -76,6 +74,8 @@ st.markdown(
   .stButton button, .stDownloadButton button { padding: 0.65rem 0.9rem; font-size: 1rem; }
   .stToggle { transform: scale(1.05); transform-origin: left center; }
 }
+.small-muted { color: rgba(49, 51, 63, 0.65); font-size: 0.9rem; }
+.hr-soft { margin: 0.35rem 0 0.65rem 0; border-top: 1px solid rgba(49,51,63,0.15); }
 </style>
     """,
     unsafe_allow_html=True,
@@ -228,7 +228,11 @@ def get_oauth_config() -> Optional[Dict[str, str]]:
 
 
 def build_flow(config: Dict[str, str]) -> "Flow":
-    scopes = ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"]  # keep scopes stable
+    scopes = [
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+    ]
     client_config = {
         "web": {
             "client_id": config["client_id"],
@@ -430,11 +434,8 @@ def _find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
     return None
 
 
-
 def _find_col_prefer_candidates(cols: List[str], candidates: List[str]) -> Optional[str]:
-    """Find the first matching column by *candidate priority* (cand-first), not by sheet column order.
-    This matters when multiple speaker-like columns exist (e.g., 講者 vs 主持人).
-    """
+    """Find the first matching column by *candidate priority* (cand-first), not by sheet column order."""
     for cand in candidates:
         for c in cols:
             if not isinstance(c, str):
@@ -442,6 +443,7 @@ def _find_col_prefer_candidates(cols: List[str], candidates: List[str]) -> Optio
             if cand in c:
                 return c
     return None
+
 
 def _join_nonempty(parts: List[Optional[str]], sep: str = " ") -> Optional[str]:
     xs = [p.strip() for p in parts if p and str(p).strip()]
@@ -671,7 +673,7 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         col_time = _find_col(cols, ["時間"])
         col_code = _find_col(cols, ["編號"])
         col_report = _find_col(cols, ["報告時間"])
-                # Speaker column: for some sheets we prefer '講者' over '作者姓名'
+        # Speaker column: for some sheets we prefer '講者' over '作者姓名'
         if str(sheet_name).strip() in ("S101國家公園", "E102林保署"):
             speaker_candidates = ["講者", "作者姓名", "主持人"]
         else:
@@ -1014,6 +1016,153 @@ def _as_set(x: Any) -> Set[str]:
     return set()
 
 
+# ============================================================
+# MVP: Abstract index + PDF viewer
+# ============================================================
+
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df2 = df.copy()
+    df2.columns = [str(c).strip() for c in df2.columns]
+    return df2
+
+
+@st.cache_data(show_spinner=False)
+def load_abstract_index_from_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    name = (filename or "").lower()
+    bio = io.BytesIO(file_bytes)
+    if name.endswith(".csv"):
+        df = pd.read_csv(bio)
+    elif name.endswith(".xlsx") or name.endswith(".xls"):
+        df = pd.read_excel(bio)
+    else:
+        # best effort: try excel then csv
+        try:
+            df = pd.read_excel(bio)
+        except Exception:
+            bio.seek(0)
+            df = pd.read_csv(bio)
+    df = _normalize_cols(df)
+    # allow a few common aliases
+    rename_map = {}
+    for c in df.columns:
+        cl = c.lower()
+        if cl in ("abstract", "摘要", "摘要內容", "內容"):
+            rename_map[c] = "abstract_text"
+        if cl in ("page", "頁碼", "頁", "p"):
+            rename_map[c] = "page"
+        if cl in ("code", "編號", "poster_code", "talk_code"):
+            rename_map[c] = "code"
+        if cl in ("key", "event_key"):
+            rename_map[c] = "key"
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # keep only relevant columns if present
+    keep = [c for c in ["code", "key", "page", "abstract_text"] if c in df.columns]
+    if keep:
+        df = df[keep].copy()
+    else:
+        df = df.copy()
+
+    # sanitize
+    if "code" in df.columns:
+        df["code"] = df["code"].map(lambda x: str(x).strip() if pd.notna(x) else "")
+    if "key" in df.columns:
+        df["key"] = df["key"].map(lambda x: str(x).strip() if pd.notna(x) else "")
+    if "page" in df.columns:
+        def _to_int(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
+                return None
+            s = str(v).strip()
+            if not s:
+                return None
+            try:
+                return int(float(s))
+            except Exception:
+                return None
+        df["page"] = df["page"].map(_to_int)
+    if "abstract_text" in df.columns:
+        df["abstract_text"] = df["abstract_text"].map(lambda x: str(x).strip() if pd.notna(x) else "")
+
+    return df
+
+
+def build_abstract_maps(abs_df: pd.DataFrame) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """
+    Return:
+      - by_code: code -> {"page": int|None, "abstract_text": str}
+      - by_key:  key  -> {"page": int|None, "abstract_text": str}
+    """
+    by_code: Dict[str, Dict[str, Any]] = {}
+    by_key: Dict[str, Dict[str, Any]] = {}
+    if abs_df is None or len(abs_df) == 0:
+        return by_code, by_key
+
+    for _, r in abs_df.iterrows():
+        code = str(r.get("code", "") or "").strip()
+        key = str(r.get("key", "") or "").strip()
+        page = r.get("page", None)
+        txt = str(r.get("abstract_text", "") or "").strip()
+
+        payload = {"page": page if isinstance(page, int) else None, "abstract_text": txt}
+
+        if code:
+            # keep first non-empty, or prefer one that has abstract_text/page
+            if code not in by_code or (payload["abstract_text"] and not by_code[code].get("abstract_text")):
+                by_code[code] = payload
+        if key:
+            if key not in by_key or (payload["abstract_text"] and not by_key[key].get("abstract_text")):
+                by_key[key] = payload
+
+    return by_code, by_key
+
+
+def resolve_abstract_for_event(event_row: pd.Series,
+                              by_code: Dict[str, Dict[str, Any]],
+                              by_key: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    code = str(event_row.get("code") or "").strip()
+    key = str(event_row.get("key") or "").strip()
+    if code and code in by_code:
+        return by_code[code]
+    if key and key in by_key:
+        return by_key[key]
+    return {"page": None, "abstract_text": ""}
+
+
+def pdf_iframe_html(src: str, height: int = 650) -> str:
+    return f'<iframe src="{src}" width="100%" height="{int(height)}" style="border: 1px solid rgba(49,51,63,0.15); border-radius: 8px;"></iframe>'
+
+
+def make_pdf_data_uri(pdf_bytes: bytes) -> str:
+    b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    # use #toolbar=1 to keep basic UI in many browsers
+    return f"data:application/pdf;base64,{b64}"
+
+
+def build_pdf_src(pdf_url: str,
+                  pdf_data_uri: Optional[str],
+                  page: Optional[int]) -> Optional[str]:
+    # prefer uploaded PDF if exists
+    base = None
+    if pdf_data_uri:
+        base = pdf_data_uri
+    elif pdf_url and pdf_url.strip():
+        base = pdf_url.strip()
+    else:
+        return None
+
+    p = int(page) if (page is not None and isinstance(page, int) and page > 0) else 1
+
+    # If url already has #, append safely
+    if "#" in base:
+        return base + f"&page={p}" if "page=" not in base else base
+    return base + f"#page={p}"
+
+
+# ============================================================
+# Main app
+# ============================================================
+
 def main():
     db_init()
 
@@ -1045,12 +1194,20 @@ def main():
         st.markdown("---")
         st.caption("🔒 登入僅用於記住你勾選的議程，不讀 Gmail、不改 Google Calendar。")
 
-# --- Persistent state manager ---
+    # --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
     st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode", False)))
     st.session_state.setdefault("selected_keys", _as_set(mgr.get("selected_keys", [])))
     st.session_state.setdefault("marked_delete_keys", _as_set(mgr.get("marked_delete_keys", [])))
     st.session_state.setdefault("confirm_delete_marked", bool(mgr.get("confirm_delete_marked", False)))
+
+    # MVP: pdf state
+    st.session_state.setdefault("pdf_page", int(mgr.get("pdf_page", 1) or 1))
+    st.session_state.setdefault("pdf_height", int(mgr.get("pdf_height", 650) or 650))
+    st.session_state.setdefault("last_preview_key", str(mgr.get("last_preview_key", "") or ""))
+
+    # MVP: expanded abstract states (do not persist every row; keep session-only)
+    st.session_state.setdefault("_abstract_expand", {})
 
     # --- Mobile toggle ---
     tcol1, tcol2 = st.columns([0.75, 0.25])
@@ -1065,12 +1222,30 @@ def main():
     days = ["D1", "D2"]
     rooms: List[str] = []
 
+    # MVP controls
+    abs_index_upload = None
+    pdf_upload = None
+    pdf_url = ""
+    manual_jump_page = None
+
     if is_mobile:
-        with st.expander("控制面板（檔案/搜尋/篩選）", expanded=False):
+        with st.expander("控制面板（檔案/搜尋/篩選/摘要PDF）", expanded=False):
             st.markdown("### 輸入議程檔案")
             uploaded = st.file_uploader("上傳 Excel（.xlsx）", type=["xlsx"])
             use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
             st.caption("預設檔案：" + DEFAULT_EXCEL_PATH)
+
+            st.markdown("---")
+            st.markdown("### 摘要索引（MVP）")
+            abs_index_upload = st.file_uploader("上傳摘要索引（CSV / Excel）", type=["csv", "xlsx", "xls"])
+            st.caption("索引欄位建議：code / key / page / abstract_text")
+
+            st.markdown("---")
+            st.markdown("### 摘要 PDF（MVP）")
+            pdf_upload = st.file_uploader("上傳摘要集 PDF（可選）", type=["pdf"])
+            pdf_url = st.text_input("或填入 PDF URL（可選）", value="")
+            manual_jump_page = st.number_input("手動跳頁（可選）", min_value=1, max_value=5000, value=int(st.session_state["pdf_page"]), step=1)
+            st.session_state["pdf_height"] = st.slider("PDF 顯示高度", min_value=350, max_value=1200, value=int(st.session_state["pdf_height"]), step=50)
 
             st.markdown("---")
             st.markdown("### 搜尋與篩選")
@@ -1085,11 +1260,24 @@ def main():
             st.caption("預設檔案：" + DEFAULT_EXCEL_PATH)
 
             st.markdown("---")
+            st.markdown("### 摘要索引（MVP）")
+            abs_index_upload = st.file_uploader("上傳摘要索引（CSV / Excel）", type=["csv", "xlsx", "xls"])
+            st.caption("索引欄位建議：code / key / page / abstract_text")
+
+            st.markdown("---")
+            st.markdown("### 摘要 PDF（MVP）")
+            pdf_upload = st.file_uploader("上傳摘要集 PDF（可選）", type=["pdf"])
+            pdf_url = st.text_input("或填入 PDF URL（可選）", value="")
+            manual_jump_page = st.number_input("手動跳頁（可選）", min_value=1, max_value=5000, value=int(st.session_state["pdf_page"]), step=1)
+            st.session_state["pdf_height"] = st.slider("PDF 顯示高度", min_value=350, max_value=1200, value=int(st.session_state["pdf_height"]), step=50)
+
+            st.markdown("---")
             st.markdown("### 搜尋與篩選")
             query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="")
             include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
             days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
 
+    # read master excel
     file_bytes: Optional[bytes] = None
     if uploaded is not None:
         file_bytes = uploaded.getvalue()
@@ -1107,6 +1295,7 @@ def main():
     sheets = load_excel_all_sheets(file_bytes)
     df_all = build_master_df(sheets)
 
+    # rooms filter
     all_rooms = sorted(df_all["room"].dropna().unique().tolist())
     if is_mobile:
         with st.expander("教室/分會場篩選（可選）", expanded=False):
@@ -1115,6 +1304,56 @@ def main():
         with st.sidebar:
             rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
 
+    # ----------------------------
+    # MVP: load abstract index maps
+    # ----------------------------
+    # Option A: uploaded abstract index
+    abs_df = None
+    if abs_index_upload is not None:
+        try:
+            abs_df = load_abstract_index_from_bytes(abs_index_upload.getvalue(), abs_index_upload.name)
+        except Exception as e:
+            st.error(f"摘要索引讀取失敗：{e}")
+
+    # Option B: if same excel contains a sheet named "摘要索引"
+    if abs_df is None and "摘要索引" in sheets:
+        try:
+            abs_df = _normalize_cols(sheets["摘要索引"])
+            # try to normalize columns similarly
+            rename_map = {}
+            for c in abs_df.columns:
+                cl = str(c).strip().lower()
+                if cl in ("abstract", "摘要", "摘要內容", "內容"):
+                    rename_map[c] = "abstract_text"
+                if cl in ("page", "頁碼", "頁", "p"):
+                    rename_map[c] = "page"
+                if cl in ("code", "編號"):
+                    rename_map[c] = "code"
+                if cl in ("key", "event_key"):
+                    rename_map[c] = "key"
+            if rename_map:
+                abs_df = abs_df.rename(columns=rename_map)
+        except Exception:
+            abs_df = None
+
+    by_code, by_key = build_abstract_maps(abs_df) if abs_df is not None else ({}, {})
+
+    # ----------------------------
+    # MVP: PDF source
+    # ----------------------------
+    pdf_data_uri = None
+    if pdf_upload is not None:
+        try:
+            pdf_data_uri = make_pdf_data_uri(pdf_upload.getvalue())
+        except Exception as e:
+            st.error(f"PDF 上傳處理失敗：{e}")
+            pdf_data_uri = None
+
+    # allow manual jump page
+    if manual_jump_page is not None:
+        st.session_state["pdf_page"] = int(manual_jump_page)
+
+    # build selected + hits
     selected_keys: Set[str] = set(st.session_state["selected_keys"])
     marked_delete: Set[str] = set(st.session_state["marked_delete_keys"])
 
@@ -1124,12 +1363,117 @@ def main():
     df_hit2 = mark_conflict_with_selected(df_hit, selected_df)
 
     # ----------------------------
+    # MVP: PDF Viewer panel (always available if pdf is provided)
+    # ----------------------------
+    st.subheader("0) 摘要 PDF（跳頁預覽）")
+    st.caption("你可以用搜尋結果的「📄 跳到 PDF」自動定位頁碼；或在側邊手動輸入頁碼。")
+
+    pdf_src = build_pdf_src(pdf_url=pdf_url, pdf_data_uri=pdf_data_uri, page=int(st.session_state["pdf_page"]))
+    if pdf_src is None:
+        st.info("尚未提供 PDF：請在側邊上傳摘要集 PDF 或填入 PDF URL（MVP）。")
+    else:
+        st.markdown(pdf_iframe_html(pdf_src, height=int(st.session_state["pdf_height"])), unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ----------------------------
     # 1) 搜尋結果
     # ----------------------------
-    st.subheader("1) 搜尋結果（加入／移除個人行事曆）")
+    st.subheader("1) 搜尋結果（加入／移除個人行事曆）＋摘要（MVP）")
     st.caption(f"符合筆數：{len(df_hit2)}（⚠️ 表示會與你已選的『非海報』行程時間重疊；海報不標衝突）")
 
+    # Helper: render a single card with MVP buttons (for mobile, and also used in desktop detail view)
+    def render_event_card(r: pd.Series, allow_add_remove: bool = True, compact: bool = False):
+        k = str(r["key"])
+        picked = (k in selected_keys)
+        conflict_flag = "⚠️" if bool(r.get("conflict_with_selected")) else ""
+        kind = str(r.get("kind") or "")
+
+        code = str(r.get("code") or "").strip()
+        title = str(r.get("title") or "").strip()
+        who = str(r.get("speaker") or "").strip()
+        where = str(r.get("room") or "").strip()
+
+        # abstract payload
+        abs_payload = resolve_abstract_for_event(r, by_code, by_key)
+        abs_page = abs_payload.get("page", None)
+        abs_text = str(abs_payload.get("abstract_text", "") or "").strip()
+
+        st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {where}**")
+        if code:
+            st.markdown(f"{conflict_flag} **{code}**  {title}")
+        else:
+            st.markdown(f"{conflict_flag} {title}")
+        if who:
+            st.caption(who)
+        if kind == "poster":
+            st.caption("（Poster：不顯示衝突⚠️，也不計入衝突統計）")
+
+        # controls row
+        c1, c2, c3, c4 = st.columns([0.20, 0.20, 0.30, 0.30])
+        with c1:
+            if allow_add_remove:
+                if picked:
+                    if st.button("移除", key=f"rm_{k}"):
+                        selected_keys.discard(k)
+                        marked_delete.discard(k)
+                        st.session_state["selected_keys"] = selected_keys
+                        st.session_state["marked_delete_keys"] = marked_delete
+                        st.session_state["confirm_delete_marked"] = False
+                        st.rerun()
+                else:
+                    if st.button("加入", key=f"add_{k}"):
+                        selected_keys.add(k)
+                        st.session_state["selected_keys"] = selected_keys
+                        st.rerun()
+        with c2:
+            # expand abstract toggle
+            exp_state = st.session_state["_abstract_expand"].get(k, False)
+            label = "收合摘要" if exp_state else "展開摘要"
+            if st.button(label, key=f"abs_{k}"):
+                st.session_state["_abstract_expand"][k] = (not exp_state)
+                st.rerun()
+        with c3:
+            # jump to pdf by abstract page if available
+            if abs_page and isinstance(abs_page, int) and abs_page > 0:
+                if st.button(f"📄 跳到第 {abs_page} 頁", key=f"pdf_{k}"):
+                    st.session_state["pdf_page"] = int(abs_page)
+                    st.session_state["last_preview_key"] = k
+                    st.rerun()
+            else:
+                st.caption("📄（無頁碼）")
+        with c4:
+            # optional manual jump with number input per card (lightweight)
+            if compact:
+                st.caption("")
+            else:
+                guess = abs_page if (abs_page and isinstance(abs_page, int) and abs_page > 0) else int(st.session_state["pdf_page"])
+                jp = st.number_input("跳頁", min_value=1, max_value=5000, value=int(guess), step=1, key=f"jp_{k}")
+                if st.button("前往", key=f"go_{k}"):
+                    st.session_state["pdf_page"] = int(jp)
+                    st.session_state["last_preview_key"] = k
+                    st.rerun()
+
+        # expanded abstract body
+        if st.session_state["_abstract_expand"].get(k, False):
+            st.markdown('<div class="hr-soft"></div>', unsafe_allow_html=True)
+            if abs_text:
+                st.markdown("**Abstract**")
+                st.write(abs_text)
+            else:
+                st.info("（尚無摘要索引：請上傳摘要索引 CSV/Excel，或在同一 Excel 新增「摘要索引」分頁）")
+
+            # show matched info
+            meta = []
+            if abs_page:
+                meta.append(f"page={abs_page}")
+            if code:
+                meta.append(f"code={code}")
+            meta.append(f"key={k[:30]}…")
+            st.caption(" · ".join(meta))
+
     if not is_mobile:
+        # --- Desktop: keep your original data_editor selection ---
         picker_df = df_for_picker(df_hit2, selected_keys, show_conflict_with_selected=True)
 
         edited = st.data_editor(
@@ -1177,7 +1521,40 @@ def main():
         with c3:
             st.caption("提示：你可以先用關鍵字或教室篩選縮小範圍，再全選。")
 
+        # --- Desktop MVP: detail viewer with expand abstract + jump to pdf ---
+        st.markdown("---")
+        st.subheader("1.5) 結果詳情（MVP：展開摘要／PDF跳頁）")
+        st.caption("Desktop 的 data_editor 不適合逐列按鈕，所以這裡用『選一筆 → 展開摘要/跳頁』來對應「被選到的那個」。")
+
+        if len(df_hit2) == 0:
+            st.info("目前沒有搜尋結果。")
+        else:
+            # build labels
+            labels = []
+            keys = []
+            for _, r in df_hit2.head(300).iterrows():
+                k = str(r["key"])
+                code = str(r.get("code") or "").strip()
+                title = str(r.get("title") or "").strip()
+                lab = f"{r['day']} {r['start']}-{r['end']} | {r['room']} | {code+' | ' if code else ''}{title[:60]}"
+                labels.append(lab)
+                keys.append(k)
+
+            # default selection: last preview key if present in current results
+            default_idx = 0
+            if st.session_state["last_preview_key"] in keys:
+                default_idx = keys.index(st.session_state["last_preview_key"])
+
+            pick = st.selectbox("選一筆查看摘要/跳頁", options=list(range(len(labels))), format_func=lambda i: labels[i], index=default_idx)
+            picked_key = keys[int(pick)]
+            st.session_state["last_preview_key"] = picked_key
+
+            rsel = df_hit2[df_hit2["key"] == picked_key].iloc[0]
+            with st.container(border=True):
+                render_event_card(rsel, allow_add_remove=True, compact=True)
+
     else:
+        # --- Mobile: per-card controls, includes abstract + pdf jump ---
         n_total = int(len(df_hit2))
         if n_total == 0:
             st.warning("沒有符合的結果：請放寬關鍵字/日期/教室篩選。")
@@ -1192,42 +1569,8 @@ def main():
             df_show = df_hit2.head(show_n).copy()
 
         for _, r in df_show.iterrows():
-            k = str(r["key"])
-            picked = (k in selected_keys)
-            conflict_flag = "⚠️" if bool(r.get("conflict_with_selected")) else ""
-            kind = str(r.get("kind") or "")
-
             with st.container(border=True):
-                top = st.columns([0.74, 0.26])
-                with top[0]:
-                    st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**")
-                    code = str(r.get("code") or "").strip()
-                    title = str(r.get("title") or "").strip()
-                    who = str(r.get("speaker") or "").strip()
-
-                    if code:
-                        st.markdown(f"{conflict_flag} **{code}**  {title}")
-                    else:
-                        st.markdown(f"{conflict_flag} {title}")
-                    if who:
-                        st.caption(who)
-                    if kind == "poster":
-                        st.caption("（Poster：不顯示衝突⚠️，也不計入衝突統計）")
-
-                with top[1]:
-                    if picked:
-                        if st.button("移除", key=f"rm_{k}"):
-                            selected_keys.discard(k)
-                            marked_delete.discard(k)
-                            st.session_state["selected_keys"] = selected_keys
-                            st.session_state["marked_delete_keys"] = marked_delete
-                            st.session_state["confirm_delete_marked"] = False
-                            st.rerun()
-                    else:
-                        if st.button("加入", key=f"add_{k}"):
-                            selected_keys.add(k)
-                            st.session_state["selected_keys"] = selected_keys
-                            st.rerun()
+                render_event_card(r, allow_add_remove=True, compact=True)
 
     selected_df = add_conflict_flags(events_from_selected(df_all, set(st.session_state["selected_keys"])))
 
@@ -1356,6 +1699,10 @@ def main():
     mgr.set("selected_keys", sorted(list(set(map(str, st.session_state["selected_keys"])))))
     mgr.set("marked_delete_keys", sorted(list(set(map(str, st.session_state["marked_delete_keys"])))))
     mgr.set("confirm_delete_marked", bool(st.session_state["confirm_delete_marked"]))
+    # MVP: persist pdf page + last preview
+    mgr.set("pdf_page", int(st.session_state.get("pdf_page", 1) or 1))
+    mgr.set("pdf_height", int(st.session_state.get("pdf_height", 650) or 650))
+    mgr.set("last_preview_key", str(st.session_state.get("last_preview_key", "") or ""))
     mgr.save()
 
 
