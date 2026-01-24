@@ -3,3 +3,4 @@ pandas
 openpyxl
 google-auth
 google-auth-oauthlib
+pymupdf
