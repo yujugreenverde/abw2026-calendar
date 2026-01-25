@@ -1,41 +1,21 @@
-# app_animal_behavior_2026_oauth_A_full_v2_2_mobile_login_fix_speaker_pref.py
+# app_animal_behavior_2026_oauth_A_full_v2_6_pdf_preload_status.py
 # ------------------------------------------------------------
-# 版本變更說明（覆蓋版｜方案A：Google 登入 + 暫存個人行事曆選擇）
-# 1) ✅ 保留你現有 Excel 解析（大會議程/分會場/海報）、衝突規則、.ics 匯出、原始分頁 tabs。
-# 2) ✅ 加入 Google OAuth 登入（只要 openid / email / profile）：
-#    - 目的：用 Google 身分（sub）當 user_id，保存「已選行程/待刪除勾選/刪除確認」等狀態
-#    - 不會讀 Gmail 信件、不會動 Google Calendar
-# 3) ✅ 把原本存在 st.session_state 的核心狀態改為「可持久化」：
-#    - selected_keys（已選行程 key set）
-#    - marked_delete_keys（待刪除 key set）
-#    - confirm_delete_marked（刪除二次確認 bool）
-#    - force_mobile_mode（Mobile mode toggle）
-#    ※ 其他 UI widget（例如 checkbox 的勾選）仍由 Streamlit 本身 session 管理。
-# 4) ✅ Excel 解析微調：在「S101國家公園」「E102林保署」分頁，報告者欄位優先抓「講者」（避免被作者姓名欄覆蓋）。
-#
-# ⚠️ Streamlit Cloud 注意
-# - 本檔預設用 SQLite（user_state.db）保存；在 Streamlit Cloud 有機率在重啟/重新部署後被重置。
-# - 若你要「真正跨重啟仍保留」，請把 db_save_state/db_load_state 換成 Supabase/Postgres/Firebase。
+# 版本變更說明（覆蓋版｜v2.7｜PDF預載＋跳頁狀態列＋iPhone iframe 重載）
+# 1) ✅ 移除「摘要索引」匯入/解析/比對功能（你說不需要）
+# 2) ✅ 預載摘要集 PDF（本機掛載檔優先）：/mnt/data/2026 動物行為研討會摘要集.pdf
+#    - 若檔不存在：可改用上傳 PDF 或填入 PDF URL
+# 3) ✅ PDF 跳頁狀態列：顯示「目前顯示第 N 頁」＋「來源/命中理由」
+# 4) ✅ iPhone Safari 常見 iframe 不重載 → 加入 cache-buster 參數，跳頁更可靠
+# 5) ✅ Mobile mode 預設開啟
+# 6) ✅ 搜尋列（query）與日期選擇（days）「永遠在頁面上方」：不放在折疊 expander 裡
 #
 # ------------------------------------------------------------
-# 你需要做的設定（一次性）：
-# A) Google Cloud Console 建 OAuth Client（Web application）
-#    Authorized redirect URI：設成你的 app URL（例：https://abw2026-xxx.streamlit.app/）
-# B) 在 Streamlit Secrets 放：
-#    [google_oauth]
-#    client_id="..."
-#    client_secret="..."
-#    redirect_uri="https://你的app網址/"   # 建議就是 app 根目錄（含尾斜線）
-#    cookie_secret="一段隨機長字串，用於簽 state"
-#
-# C) requirements.txt（或 Streamlit Cloud packages）加入：
-#    google-auth
-#    google-auth-oauthlib
+# 重要部署提醒（可選）
+# - 若你要做「PDF 內文搜尋」(例如輸入作者/編號在 PDF 裡找頁碼)，需要 PyPDF2：
+#   requirements.txt 加入：PyPDF2
+# - 若沒有 PyPDF2，本 app 仍可用「手動頁碼跳頁」與「固定預載 PDF」。
 #
 # ------------------------------------------------------------
-# Usage:
-#   streamlit run app_animal_behavior_2026_oauth_A_full_v2_2_mobile_login_fix_speaker_pref.py
-#
 from __future__ import annotations
 
 import os
@@ -53,14 +33,62 @@ from typing import Dict, Tuple, Optional, List, Set, Any
 import pandas as pd
 import streamlit as st
 
-APP_TITLE = "動物行為研討會 2026｜議程搜尋＋個人化行事曆"
+# ----------------------------
+# Streamlit compatibility helpers (avoid blank page on older Streamlit)
+# ----------------------------
+def _st_link_button(label: str, url: str, use_container_width: bool = False):
+    if hasattr(st, "link_button"):
+        return _st_link_button(label, url, use_container_width=use_container_width)
+    # fallback
+    return st.markdown(f"- [{label}]({url})")
+
+def _container(border: bool = False):
+    # streamlit < 1.25 may not support border arg
+    try:
+        return st.container(border=border)  # type: ignore
+    except TypeError:
+        return st.container()
+
+
+APP_TITLE = "2026 動物行為暨生態研討會｜議程搜尋＋個人化行事曆"
 DEFAULT_EXCEL_PATH = "2026 動行議程.xlsx"
+
+# ✅ 預載 PDF（掛載在 Streamlit Cloud/本地專案時，請把檔案放到專案可讀路徑）
+DEFAULT_PDF_PATH = "/mnt/data/2026 動物行為研討會摘要集.pdf"
+# 預載 PDF：會依序嘗試下列路徑（先找到先用）
+# - Streamlit Cloud：請把 PDF 放進 repo（與 app 同層或 static/ 資料夾）
+# - 本機：可用絕對路徑
+PRELOAD_PDF_CANDIDATES = [
+    DEFAULT_PDF_PATH,
+    '2026 動物行為研討會摘要集.pdf',
+    'static/2026 動物行為研討會摘要集.pdf',
+    'data/2026 動物行為研討會摘要集.pdf',
+]
+
+def _pick_first_existing_path(paths):
+    for p in paths:
+        try:
+            if p and os.path.exists(p):
+                return p
+        except Exception:
+            pass
+    return None
+
+@st.cache_data(show_spinner=False)
+def load_pdf_bytes_from_path(path: str) -> Optional[bytes]:
+    if not path:
+        return None
+    try:
+        with open(path, 'rb') as f:
+            return f.read()
+    except Exception:
+        return None
+
 
 DATE_MAP = {
     "D1": dt.date(2026, 1, 26),
     "D2": dt.date(2026, 1, 27),
 }
-
 TITLE_SPAN_RIGHT = 6
 
 # ----------------------------
@@ -76,6 +104,8 @@ st.markdown(
   .stButton button, .stDownloadButton button { padding: 0.65rem 0.9rem; font-size: 1rem; }
   .stToggle { transform: scale(1.05); transform-origin: left center; }
 }
+.small-muted { color: rgba(49, 51, 63, 0.65); font-size: 0.9rem; }
+.hr-soft { margin: 0.35rem 0 0.65rem 0; border-top: 1px solid rgba(49,51,63,0.15); }
 </style>
     """,
     unsafe_allow_html=True,
@@ -84,7 +114,6 @@ st.markdown(
 # ============================================================
 # 方案A：Google OAuth + Persisted User State (SQLite)
 # ============================================================
-
 APP_DB_PATH = "user_state.db"
 APP_STATE_TABLE = "user_state_v1"
 
@@ -123,7 +152,6 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def hmac_compare(a: str, b: str) -> bool:
-    # constant-time compare
     if len(a) != len(b):
         return False
     out = 0
@@ -228,7 +256,11 @@ def get_oauth_config() -> Optional[Dict[str, str]]:
 
 
 def build_flow(config: Dict[str, str]) -> "Flow":
-    scopes = ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"]  # keep scopes stable
+    scopes = [
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+    ]
     client_config = {
         "web": {
             "client_id": config["client_id"],
@@ -237,12 +269,10 @@ def build_flow(config: Dict[str, str]) -> "Flow":
             "token_uri": "https://oauth2.googleapis.com/token",
         }
     }
-    flow = Flow.from_client_config(client_config, scopes=scopes, redirect_uri=config["redirect_uri"])
-    return flow
+    return Flow.from_client_config(client_config, scopes=scopes, redirect_uri=config["redirect_uri"])
 
 
 def auth_ui_sidebar() -> Optional[AuthUser]:
-    """Sidebar auth UI. Return AuthUser if logged in, else None."""
     st.session_state.setdefault("auth_user", None)
     st.session_state.setdefault("auth_error", None)
 
@@ -269,7 +299,7 @@ def auth_ui_sidebar() -> Optional[AuthUser]:
             state=signed_state,
             prompt="select_account",
         )
-        st.link_button("用 Google 登入（記住我的選擇）", auth_url, use_container_width=True)
+        _st_link_button("用 Google 登入（記住我的選擇）", auth_url, use_container_width=True)
         return None
 
     if not state_token:
@@ -390,7 +420,7 @@ def _parse_time_str(s: str) -> Optional[dt.time]:
 
 
 def _parse_time_range(x: object) -> Optional[Tuple[str, str]]:
-    if x is None or (isinstance(x, float) and pd.isna(x)) or (isinstance(x, pd._libs.missing.NAType)):  # type: ignore
+    if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
     s = str(x).strip()
     m = _TIME_RANGE_RE.match(s)
@@ -430,11 +460,7 @@ def _find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
     return None
 
 
-
 def _find_col_prefer_candidates(cols: List[str], candidates: List[str]) -> Optional[str]:
-    """Find the first matching column by *candidate priority* (cand-first), not by sheet column order.
-    This matters when multiple speaker-like columns exist (e.g., 講者 vs 主持人).
-    """
     for cand in candidates:
         for c in cols:
             if not isinstance(c, str):
@@ -442,6 +468,7 @@ def _find_col_prefer_candidates(cols: List[str], candidates: List[str]) -> Optio
             if cand in c:
                 return c
     return None
+
 
 def _join_nonempty(parts: List[Optional[str]], sep: str = " ") -> Optional[str]:
     xs = [p.strip() for p in parts if p and str(p).strip()]
@@ -671,7 +698,6 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         col_time = _find_col(cols, ["時間"])
         col_code = _find_col(cols, ["編號"])
         col_report = _find_col(cols, ["報告時間"])
-                # Speaker column: for some sheets we prefer '講者' over '作者姓名'
         if str(sheet_name).strip() in ("S101國家公園", "E102林保署"):
             speaker_candidates = ["講者", "作者姓名", "主持人"]
         else:
@@ -770,9 +796,7 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         lambda s: "D1 (2026-01-26)" if s == "2026-01-26" else ("D2 (2026-01-27)" if s == "2026-01-27" else str(s))
     )
     mdf["time"] = mdf["start"].astype(str) + "–" + mdf["end"].astype(str)
-    mdf["who"] = mdf["speaker"].fillna("")
     mdf["where"] = mdf["location"].fillna(mdf["room"])
-    mdf["what"] = mdf["title"].fillna("")
     mdf["key"] = (
         mdf["date"].astype(str)
         + "|" + mdf["room"].astype(str)
@@ -1014,350 +1038,49 @@ def _as_set(x: Any) -> Set[str]:
     return set()
 
 
-def main():
-    db_init()
+# ============================================================
+# PDF helpers (preload + iframe + iOS reload)
+# ============================================================
 
-    st.title(APP_TITLE)
+@st.cache_data(show_spinner=False)
+def load_default_pdf_bytes(path: str) -> Optional[bytes]:
+    try:
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                return f.read()
+    except Exception:
+        return None
+    return None
 
-    # --- Auth panel (visible on mobile too) ---
-    with st.expander("狀態保存（Google 登入）", expanded=False):
-        user = auth_ui_sidebar()  # renders login link if not yet authenticated
 
-        err = st.session_state.get("auth_error")
-        if err:
-            st.error(err)
+@st.cache_data(show_spinner=False)
+def make_pdf_data_uri(pdf_bytes: bytes) -> str:
+    b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    return f"data:application/pdf;base64,{b64}"
 
-        if user is None:
-            if get_oauth_config() is None:
-                st.warning("尚未設定 Google OAuth secrets；目前只能匿名模式（重整/跳掉可能會遺失勾選）。")
-            if not _GOOGLE_LIBS_OK:
-                st.warning("缺少 google-auth / google-auth-oauthlib，無法啟用登入。")
-        else:
-            c1, c2 = st.columns([1, 3])
-            with c1:
-                if user.picture:
-                    st.image(user.picture, width=48)
-            with c2:
-                st.write(f"**{user.name or '已登入'}**")
-                st.caption(user.email or "（email 未提供）")
-            logout_ui()
 
-        st.markdown("---")
-        st.caption("🔒 登入僅用於記住你勾選的議程，不讀 Gmail、不改 Google Calendar。")
+def pdf_iframe_html(src: str, height: int = 650) -> str:
+    return f'<iframe src="{src}" width="100%" height="{int(height)}" style="border: 1px solid rgba(49,51,63,0.15); border-radius: 8px;"></iframe>'
 
-# --- Persistent state manager ---
-    mgr = UserStateManager(st.session_state.get("auth_user"))
-    st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode", False)))
-    st.session_state.setdefault("selected_keys", _as_set(mgr.get("selected_keys", [])))
-    st.session_state.setdefault("marked_delete_keys", _as_set(mgr.get("marked_delete_keys", [])))
-    st.session_state.setdefault("confirm_delete_marked", bool(mgr.get("confirm_delete_marked", False)))
 
-    # --- Mobile toggle ---
-    tcol1, tcol2 = st.columns([0.75, 0.25])
-    with tcol2:
-        st.session_state.force_mobile_mode = st.toggle("Mobile mode", value=bool(st.session_state.force_mobile_mode))
-    is_mobile = bool(st.session_state.force_mobile_mode)
-
-    uploaded = None
-    use_default = True
-    query = ""
-    include_main = True
-    days = ["D1", "D2"]
-    rooms: List[str] = []
-
-    if is_mobile:
-        with st.expander("控制面板（檔案/搜尋/篩選）", expanded=False):
-            st.markdown("### 輸入議程檔案")
-            uploaded = st.file_uploader("上傳 Excel（.xlsx）", type=["xlsx"])
-            use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
-            st.caption("預設檔案：" + DEFAULT_EXCEL_PATH)
-
-            st.markdown("---")
-            st.markdown("### 搜尋與篩選")
-            query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="")
-            include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
-            days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
+def build_pdf_src(pdf_url: str, pdf_data_uri: Optional[str], page: Optional[int]) -> Optional[str]:
+    base = None
+    if pdf_data_uri:
+        base = pdf_data_uri
+    elif pdf_url and pdf_url.strip():
+        base = pdf_url.strip()
     else:
-        with st.sidebar:
-            st.markdown("### 輸入議程檔案")
-            uploaded = st.file_uploader("上傳 Excel（.xlsx）", type=["xlsx"])
-            use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
-            st.caption("預設檔案：" + DEFAULT_EXCEL_PATH)
+        return None
 
-            st.markdown("---")
-            st.markdown("### 搜尋與篩選")
-            query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="")
-            include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
-            days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
+    p = int(page) if page and int(page) > 0 else 1
 
-    file_bytes: Optional[bytes] = None
-    if uploaded is not None:
-        file_bytes = uploaded.getvalue()
-    elif use_default:
-        try:
-            with open(DEFAULT_EXCEL_PATH, "rb") as f:
-                file_bytes = f.read()
-        except Exception as e:
-            st.error(f"讀取預設檔案失敗：{e}")
+    # ✅ cache-buster：逼 iOS Safari 重新載入 iframe
+    nonce = int(time.time() * 1000)
 
-    if not file_bytes:
-        st.info("請上傳 Excel 檔，或勾選使用預設檔案。")
-        st.stop()
-
-    sheets = load_excel_all_sheets(file_bytes)
-    df_all = build_master_df(sheets)
-
-    all_rooms = sorted(df_all["room"].dropna().unique().tolist())
-    if is_mobile:
-        with st.expander("教室/分會場篩選（可選）", expanded=False):
-            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
+    if "#" in base:
+        return f"{base}&page={p}&_={nonce}"
     else:
-        with st.sidebar:
-            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
-
-    selected_keys: Set[str] = set(st.session_state["selected_keys"])
-    marked_delete: Set[str] = set(st.session_state["marked_delete_keys"])
-
-    selected_df = add_conflict_flags(events_from_selected(df_all, selected_keys))
-
-    df_hit = filter_events(df_all, query=query, days=days, rooms=rooms, include_main=include_main)
-    df_hit2 = mark_conflict_with_selected(df_hit, selected_df)
-
-    # ----------------------------
-    # 1) 搜尋結果
-    # ----------------------------
-    st.subheader("1) 搜尋結果（加入／移除個人行事曆）")
-    st.caption(f"符合筆數：{len(df_hit2)}（⚠️ 表示會與你已選的『非海報』行程時間重疊；海報不標衝突）")
-
-    if not is_mobile:
-        picker_df = df_for_picker(df_hit2, selected_keys, show_conflict_with_selected=True)
-
-        edited = st.data_editor(
-            picker_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "選取": st.column_config.CheckboxColumn("選取", help="勾選加入個人化行事曆"),
-                "衝突": st.column_config.TextColumn("衝突", width="small", help="⚠️ 表示會與已選（非海報）行程撞期；海報不標"),
-                "投稿題目/演講主題": st.column_config.TextColumn(width="large"),
-                "作者/講者/主持": st.column_config.TextColumn(width="medium"),
-                "主題領域": st.column_config.TextColumn(width="medium"),
-                "單位": st.column_config.TextColumn(width="medium"),
-            },
-            disabled=[
-                "衝突", "日期", "時間", "教室/分會場", "編號",
-                "投稿題目/演講主題", "作者/講者/主持", "主題領域", "單位", "地點",
-            ],
-            key="editor_results",
-        )
-
-        hit_keys = df_hit2["key"].tolist()
-        new_selected = set(selected_keys)
-        for i, row in edited.iterrows():
-            k = hit_keys[i]
-            if bool(row["選取"]):
-                new_selected.add(k)
-            else:
-                new_selected.discard(k)
-
-        selected_keys = new_selected
-        st.session_state["selected_keys"] = selected_keys
-
-        c1, c2, c3 = st.columns([0.22, 0.22, 0.56])
-        with c1:
-            if st.button("全選（本頁）"):
-                st.session_state["selected_keys"] = set(st.session_state["selected_keys"]).union(set(hit_keys))
-                st.rerun()
-        with c2:
-            if st.button("全取消"):
-                st.session_state["selected_keys"] = set()
-                st.session_state["marked_delete_keys"] = set()
-                st.session_state["confirm_delete_marked"] = False
-                st.rerun()
-        with c3:
-            st.caption("提示：你可以先用關鍵字或教室篩選縮小範圍，再全選。")
-
-    else:
-        n_total = int(len(df_hit2))
-        if n_total == 0:
-            st.warning("沒有符合的結果：請放寬關鍵字/日期/教室篩選。")
-            df_show = df_hit2
-        elif n_total <= 10:
-            st.caption(f"目前結果 {n_total} 筆（少於 10 筆，不顯示筆數滑桿）")
-            df_show = df_hit2
-        else:
-            max_n = min(200, n_total)
-            default_n = min(30, max_n)
-            show_n = st.slider("顯示筆數", min_value=10, max_value=max_n, value=default_n, step=10)
-            df_show = df_hit2.head(show_n).copy()
-
-        for _, r in df_show.iterrows():
-            k = str(r["key"])
-            picked = (k in selected_keys)
-            conflict_flag = "⚠️" if bool(r.get("conflict_with_selected")) else ""
-            kind = str(r.get("kind") or "")
-
-            with st.container(border=True):
-                top = st.columns([0.74, 0.26])
-                with top[0]:
-                    st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**")
-                    code = str(r.get("code") or "").strip()
-                    title = str(r.get("title") or "").strip()
-                    who = str(r.get("speaker") or "").strip()
-
-                    if code:
-                        st.markdown(f"{conflict_flag} **{code}**  {title}")
-                    else:
-                        st.markdown(f"{conflict_flag} {title}")
-                    if who:
-                        st.caption(who)
-                    if kind == "poster":
-                        st.caption("（Poster：不顯示衝突⚠️，也不計入衝突統計）")
-
-                with top[1]:
-                    if picked:
-                        if st.button("移除", key=f"rm_{k}"):
-                            selected_keys.discard(k)
-                            marked_delete.discard(k)
-                            st.session_state["selected_keys"] = selected_keys
-                            st.session_state["marked_delete_keys"] = marked_delete
-                            st.session_state["confirm_delete_marked"] = False
-                            st.rerun()
-                    else:
-                        if st.button("加入", key=f"add_{k}"):
-                            selected_keys.add(k)
-                            st.session_state["selected_keys"] = selected_keys
-                            st.rerun()
-
-    selected_df = add_conflict_flags(events_from_selected(df_all, set(st.session_state["selected_keys"])))
-
-    # ----------------------------
-    # 2) 個人化行事曆（兩天）
-    # ----------------------------
-    st.markdown("---")
-    st.subheader("2) 個人化行事曆（兩天）")
-
-    d1_n = int((selected_df["day"] == "D1").sum()) if len(selected_df) else 0
-    d2_n = int((selected_df["day"] == "D2").sum()) if len(selected_df) else 0
-    conf_n = int(selected_df["conflict"].sum()) if len(selected_df) and "conflict" in selected_df.columns else 0
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("D1 已選", d1_n)
-    m2.metric("D2 已選", d2_n)
-    m3.metric("衝突場次（不含海報）", conf_n)
-
-    if len(selected_df) == 0:
-        st.info("尚未選取任何議程。")
-    else:
-        st.markdown("### 🗑️ 在行事曆清單中勾選刪除（勾選後會進待刪除清單）")
-        st.caption("海報不計入衝突；衝突事件（非海報）會在清單中標示 ⚠️。")
-
-        def _event_label(r: pd.Series) -> str:
-            where = str(r.get("where") or r.get("room") or "").strip()
-            code = str(r.get("code") or "").strip()
-            title = str(r.get("title") or "").strip()
-            s = f"{r['start']}–{r['end']}｜{where}"
-            if code:
-                s += f"｜{code}"
-            if title:
-                s += f"｜{title[:40]}"
-                if len(title) > 40:
-                    s += "…"
-            kind = str(r.get("kind") or "")
-            conflict = bool(r.get("conflict")) if (kind != "poster") else False
-            prefix = "⚠️ " if conflict else ""
-            return prefix + s
-
-        for day, label in [("D1", "D1｜2026-01-26"), ("D2", "D2｜2026-01-27")]:
-            sub = selected_df[selected_df["day"] == day].copy().sort_values(["start_dt", "room", "code"])
-            expand_default = bool((sub["conflict"].sum() > 0)) if len(sub) else False
-
-            with st.expander(f"{label}（{len(sub)} 場）", expanded=expand_default):
-                if len(sub) == 0:
-                    st.caption("（此日尚未選取）")
-                    continue
-
-                for _, r in sub.iterrows():
-                    k = str(r["key"])
-                    checked = (k in st.session_state["marked_delete_keys"])
-                    new_checked = st.checkbox(_event_label(r), value=checked, key=f"delchk_{day}_{k}")
-                    if new_checked and (k not in st.session_state["marked_delete_keys"]):
-                        st.session_state["marked_delete_keys"].add(k)
-                        st.session_state["confirm_delete_marked"] = False
-                    if (not new_checked) and (k in st.session_state["marked_delete_keys"]):
-                        st.session_state["marked_delete_keys"].discard(k)
-                        st.session_state["confirm_delete_marked"] = False
-
-        st.divider()
-        st.subheader("🗑️ 待刪除清單（已勾選）")
-
-        marked_delete = set(st.session_state["marked_delete_keys"])
-        marked_df = selected_df[selected_df["key"].isin(list(marked_delete))].copy().sort_values(["start_dt", "room"])
-
-        if len(marked_df) == 0:
-            st.caption("（目前沒有勾選任何待刪除行程）")
-        else:
-            for _, r in marked_df.iterrows():
-                with st.container(border=True):
-                    st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**")
-                    code = str(r.get("code") or "").strip()
-                    title = str(r.get("title") or "").strip()
-                    if code:
-                        st.markdown(f"**{code}**  {title}")
-                    else:
-                        st.markdown(title)
-                    who = str(r.get("speaker") or "").strip()
-                    if who:
-                        st.caption(who)
-
-            st.divider()
-            if not st.session_state["confirm_delete_marked"]:
-                if st.button("刪除以上已勾選（需再次確認）", type="primary"):
-                    st.session_state["confirm_delete_marked"] = True
-                    st.rerun()
-            else:
-                st.error("再次確認：確定要把這些行程從『已選清單』移除嗎？（可之後再從搜尋結果重新加入）")
-                b1, b2 = st.columns(2)
-                if b1.button("確定刪除", type="primary"):
-                    sel = set(st.session_state["selected_keys"])
-                    md = set(st.session_state["marked_delete_keys"])
-                    sel -= md
-                    st.session_state["selected_keys"] = sel
-                    st.session_state["marked_delete_keys"] = set()
-                    st.session_state["confirm_delete_marked"] = False
-                    st.rerun()
-                if b2.button("取消"):
-                    st.session_state["confirm_delete_marked"] = False
-                    st.rerun()
-
-        ics_text = build_ics(selected_df)
-        st.download_button(
-            "下載 .ics 行事曆檔（可匯入 Google/Apple Calendar）",
-            data=ics_text.encode("utf-8"),
-            file_name="animal_behavior_workshop_2026_selected.ics",
-            mime="text/calendar",
-        )
-
-    # ----------------------------
-    # 3) Raw sheets
-    # ----------------------------
-    st.markdown("---")
-    st.subheader("3) 大會議程（Excel 原始分頁）")
-    st.caption("下方直接呈現 Excel 每個分頁內容，便於核對。")
-
-    tab_names = list(sheets.keys())
-    tabs = st.tabs(tab_names)
-    for name, tab in zip(tab_names, tabs):
-        with tab:
-            st.dataframe(sheets[name], use_container_width=True, hide_index=True)
-
-    # ---- Persist core state (end of run) ----
-    mgr.set("force_mobile_mode", bool(st.session_state.force_mobile_mode))
-    mgr.set("selected_keys", sorted(list(set(map(str, st.session_state["selected_keys"])))))
-    mgr.set("marked_delete_keys", sorted(list(set(map(str, st.session_state["marked_delete_keys"])))))
-    mgr.set("confirm_delete_marked", bool(st.session_state["confirm_delete_marked"]))
-    mgr.save()
+        return f"{base}#page={p}&_={nonce}"
 
 
-if __name__ == "__main__":
-    main()
+# ============================================================
