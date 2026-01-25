@@ -1162,7 +1162,7 @@ def main():
     
 
     # --- Abstract PDF panel (pre-mounted) ---
-    with st.expander("摘要集 PDF（預先掛載）", expanded=not is_mobile):
+    with st.expander("摘要集 PDF（掛載）", expanded=not is_mobile):
         st.caption(f"預設路徑：`{DEFAULT_ABSTRACT_PDF_PATH}`（請把 PDF 放在 repo 的 data/ 目錄）")
         if not _PDF_LIBS_OK:
             st.warning("尚未安裝 pymupdf（import fitz 失敗）。請在 requirements.txt 加上 `pymupdf`。")
@@ -1189,7 +1189,7 @@ def main():
     rooms: List[str] = []
 
     if is_mobile:
-        with st.expander("議程檔案 (預先掛載)", expanded=False):
+        with st.expander("議程檔案 (掛載)", expanded=False):
             st.markdown("### 輸入議程檔案")
             uploaded = st.file_uploader("上傳 Excel（.xlsx）", type=["xlsx"])
             use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
