@@ -1139,7 +1139,7 @@ def main():
 
     # --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
-    st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode", Ｔure)))
+    st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode",Ｔure)))
     st.session_state.setdefault("selected_keys", _as_set(mgr.get("selected_keys", [])))
     st.session_state.setdefault("marked_delete_keys", _as_set(mgr.get("marked_delete_keys", [])))
     st.session_state.setdefault("confirm_delete_marked", bool(mgr.get("confirm_delete_marked", False)))
