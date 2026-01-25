@@ -1223,7 +1223,8 @@ def main():
         st.info("請上傳 Excel 檔，或勾選使用預設檔案。")
         st.stop()
 
-   sheets = load_excel_all_sheets(file_bytes)
+    # ⬇⬇⬇ 這裡「完全不要多縮排」
+    sheets = load_excel_all_sheets(file_bytes)
     df_all = build_master_df(sheets)
 
     # ✅ 在這裡把摘要頁碼回填進 df_all（依 code）
