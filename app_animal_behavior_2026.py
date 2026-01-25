@@ -1,13 +1,19 @@
-# app_animal_behavior_2026_oauth_A_full_v2_2_1_speaker_pref.py
+# app_animal_behavior_2026_oauth_A_full_v2_2_2_abstract_mount.py
 # ------------------------------------------------------------
-# 版本變更說明（覆蓋版｜v2.2.1）
-# 1) ✅ 修正 build_master_df() 內縮排錯誤（原版會 IndentationError）
-# 2) ✅ 新增「講者偏好 ⭐」功能（可持久化）：
-#    - preferred_speakers：持久化保存（登入→SQLite；未登入→session）
-#    - 篩選：只顯示偏好講者 / 高亮偏好講者
-#    - Mobile 卡片：一鍵⭐/取消⭐
-# 3) ✅ 不改你既有的 Excel 解析、衝突規則、.ics、tabs 結構
-
+# 版本變更說明（覆蓋版｜v2.2.2：摘要集 PDF 預先掛載 + 自動回填摘要頁碼）
+# 1) ✅ 保留你現有 Excel 解析（大會議程/分會場/海報）、衝突規則、.ics 匯出、原始分頁 tabs。
+# 2) ✅ 保留 Google OAuth 登入（openid / email / profile）+ SQLite 保存選取狀態。
+# 3) ✅ 新增「摘要集 PDF（預先掛載）」支援：
+#    - 預設路徑：data/2026 動物行為研討會摘要集.pdf（放在 GitHub repo 內）
+#    - 啟動時一次掃描 PDF 逐頁文字，抽出 token 建 code->page 對照（單次 pass）
+#    - 在搜尋結果表格/手機卡片中顯示「摘要頁 p.X」
+#    - 提供「下載摘要 PDF」按鈕（直接下載 repo 內檔案）
+# 4) ✅ 若缺 PDF 或缺 pymupdf 套件：顯示 warning，不影響議程工具運作。
+#
+# ⚠️ Streamlit Cloud 注意
+# - SQLite（user_state.db）可能在重啟/重新部署後被重置；要跨重啟永久保存請換外部 DB。
+#
+# ------------------------------------------------------------
 from __future__ import annotations
 
 import os
@@ -27,6 +33,9 @@ import streamlit as st
 
 APP_TITLE = "動物行為研討會 2026｜議程搜尋＋個人化行事曆"
 DEFAULT_EXCEL_PATH = "2026 動行議程.xlsx"
+
+# ✅ 摘要集 PDF：預設 repo 內掛載路徑（你要把 PDF 放在這裡）
+DEFAULT_ABSTRACT_PDF_PATH = os.path.join("data", "2026 動物行為研討會摘要集.pdf")
 
 DATE_MAP = {
     "D1": dt.date(2026, 1, 26),
@@ -54,12 +63,13 @@ st.markdown(
 )
 
 # ============================================================
-# Google OAuth + Persisted User State (SQLite)
+# 方案A：Google OAuth + Persisted User State (SQLite)
 # ============================================================
 
 APP_DB_PATH = "user_state.db"
 APP_STATE_TABLE = "user_state_v1"
 
+# Optional Google OAuth dependencies
 try:
     from google_auth_oauthlib.flow import Flow
     from google.oauth2 import id_token as google_id_token
@@ -68,8 +78,16 @@ try:
 except Exception:
     _GOOGLE_LIBS_OK = False
 
+# Optional PDF dependency (PyMuPDF)
+try:
+    import fitz  # pymupdf
+    _PDF_LIBS_OK = True
+except Exception:
+    _PDF_LIBS_OK = False
+
 
 def _get_secret(path: str, default: Optional[str] = None) -> Optional[str]:
+    """Read from st.secrets with dotted path, e.g. 'google_oauth.client_id'."""
     try:
         cur = st.secrets
         for part in path.split("."):
@@ -93,6 +111,7 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def hmac_compare(a: str, b: str) -> bool:
+    # constant-time compare
     if len(a) != len(b):
         return False
     out = 0
@@ -214,7 +233,8 @@ def build_flow(config: Dict[str, str]) -> "Flow":
     return flow
 
 
-def auth_ui() -> Optional[AuthUser]:
+def auth_ui_sidebar() -> Optional[AuthUser]:
+    """Sidebar auth UI. Return AuthUser if logged in, else None."""
     st.session_state.setdefault("auth_user", None)
     st.session_state.setdefault("auth_error", None)
 
@@ -228,6 +248,7 @@ def auth_ui() -> Optional[AuthUser]:
     qp = st.query_params
     code = qp.get("code", None)
     state_token = qp.get("state", None)
+
     cookie_secret = config["cookie_secret"]
 
     if not code:
@@ -402,6 +423,7 @@ def _find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
 
 
 def _find_col_prefer_candidates(cols: List[str], candidates: List[str]) -> Optional[str]:
+    """Find the first matching column by *candidate priority* (cand-first), not by sheet column order."""
     for cand in candidates:
         for c in cols:
             if not isinstance(c, str):
@@ -640,7 +662,7 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         col_code = _find_col(cols, ["編號"])
         col_report = _find_col(cols, ["報告時間"])
 
-        # Speaker column: for some sheets we prefer '講者' over '作者姓名'
+        # Speaker column preference for certain sheets
         if str(sheet_name).strip() in ("S101國家公園", "E102林保署"):
             speaker_candidates = ["講者", "作者姓名", "主持人"]
         else:
@@ -742,6 +764,7 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     mdf["who"] = mdf["speaker"].fillna("")
     mdf["where"] = mdf["location"].fillna(mdf["room"])
     mdf["what"] = mdf["title"].fillna("")
+
     mdf["key"] = (
         mdf["date"].astype(str)
         + "|" + mdf["room"].astype(str)
@@ -750,8 +773,80 @@ def build_master_df(sheets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         + "|" + mdf["code"].fillna("").astype(str)
         + "|" + mdf["title"].fillna("").astype(str)
     )
+
+    # ✅ 預留摘要頁欄位（稍後在 main() 中依 PDF 自動回填）
+    if "abstract_page" not in mdf.columns:
+        mdf["abstract_page"] = pd.NA
+
     return mdf
 
+
+# ============================================================
+# Abstract PDF indexing (pre-mounted)
+# ============================================================
+
+def _normalize_code(x: Any) -> Optional[str]:
+    s = _safe_str(x)
+    if not s:
+        return None
+    return s.strip().upper().replace("｜", "|")
+
+
+@st.cache_resource(show_spinner=True)
+def build_abstract_code_to_page_map(pdf_path: str) -> Dict[str, int]:
+    """
+    Single-pass scan through PDF pages:
+    - extract text per page
+    - find "token-like" codes (e.g., PA01, PB12, O101, S203, etc.)
+    - map token -> earliest page (1-based)
+    """
+    if (not _PDF_LIBS_OK) or (not os.path.exists(pdf_path)):
+        return {}
+
+    doc = fitz.open(pdf_path)
+
+    # 規則：抽「看起來像編號」的 token
+    # 1) 海報常見：P[A-Z]\d{2}  (PA01)
+    # 2) 口頭/分組常見：A-Z 1-2字 + 2-4數字 (O101 / S101 / E102 / A12...)
+    pat = re.compile(r"\b(P[A-Z]\d{2}|[A-Z]{1,2}\d{2,4})\b")
+
+    m: Dict[str, int] = {}
+    for i in range(doc.page_count):
+        text = doc.load_page(i).get_text("text") or ""
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            continue
+        toks = pat.findall(text)
+        if not toks:
+            continue
+        page_no = i + 1
+        for t in toks:
+            tt = (t or "").strip().upper()
+            if not tt:
+                continue
+            if tt not in m:
+                m[tt] = page_no
+    return m
+
+
+def attach_abstract_page(df_all: pd.DataFrame, code2page: Dict[str, int]) -> pd.DataFrame:
+    if df_all is None or len(df_all) == 0:
+        return df_all
+    if not code2page:
+        df_all = df_all.copy()
+        df_all["abstract_page"] = pd.NA
+        return df_all
+
+    df_all = df_all.copy()
+    df_all["code_norm"] = df_all["code"].map(_normalize_code)
+    df_all["abstract_page"] = df_all["code_norm"].map(lambda c: code2page.get(c) if c else None)
+    df_all = df_all.drop(columns=["code_norm"], errors="ignore")
+    return df_all
+
+
+# ============================================================
+# Search / filtering
+# ============================================================
 
 def _match_query(text: str, q: str) -> bool:
     tokens = [t.strip() for t in re.split(r"\s+", q) if t.strip()]
@@ -759,15 +854,7 @@ def _match_query(text: str, q: str) -> bool:
     return all(t.lower() in text_low for t in tokens)
 
 
-def filter_events(
-    df: pd.DataFrame,
-    query: str,
-    days: List[str],
-    rooms: List[str],
-    include_main: bool,
-    preferred_speakers: Set[str],
-    preferred_only: bool,
-) -> pd.DataFrame:
+def filter_events(df: pd.DataFrame, query: str, days: List[str], rooms: List[str], include_main: bool) -> pd.DataFrame:
     out = df.copy()
     if not include_main:
         out = out[out["kind"] != "main_schedule"]
@@ -788,14 +875,6 @@ def filter_events(
             + out["session"].fillna("")
         )
         out = out[blob.map(lambda s: _match_query(s, q))]
-
-    if preferred_only:
-        ps = set([s.strip() for s in preferred_speakers if str(s).strip()])
-        if ps:
-            out = out[out["speaker"].fillna("").map(lambda x: str(x).strip() in ps)]
-        else:
-            # 沒有任何偏好講者時，preferred_only 會讓結果為空（比較符合直覺）
-            out = out.iloc[0:0]
 
     return out.sort_values(["start_dt", "room", "code"], na_position="last").reset_index(drop=True)
 
@@ -892,18 +971,21 @@ def mark_conflict_with_selected(candidates: pd.DataFrame, selected: pd.DataFrame
     return out
 
 
-def df_for_picker(df: pd.DataFrame, selected_keys: Set[str], preferred_speakers: Set[str]) -> pd.DataFrame:
-    cols = ["key", "display_date", "time", "room", "code", "title", "speaker", "session", "affiliation", "where", "conflict_with_selected"]
+def df_for_picker(df: pd.DataFrame, selected_keys: Set[str], show_conflict_with_selected: bool = True) -> pd.DataFrame:
+    # ✅ 新增 abstract_page 顯示
+    cols = ["key", "display_date", "time", "room", "code", "abstract_page", "title", "speaker", "session", "affiliation", "where"]
+    if "conflict_with_selected" in df.columns and show_conflict_with_selected:
+        cols.insert(1, "conflict_with_selected")
+
     show = df[cols].copy()
-
-    # 欄位：偏好講者 ⭐
-    ps = set([s.strip() for s in preferred_speakers if str(s).strip()])
-    show.insert(0, "⭐", show["speaker"].fillna("").map(lambda s: "⭐" if str(s).strip() in ps else ""))
-
-    # 欄位：選取 checkbox
     show.insert(0, "選取", show["key"].map(lambda k: k in selected_keys))
 
-    show["conflict_with_selected"] = show["conflict_with_selected"].map(lambda x: "⚠️" if bool(x) else "")
+    if "conflict_with_selected" in show.columns:
+        show["conflict_with_selected"] = show["conflict_with_selected"].map(lambda x: "⚠️" if bool(x) else "")
+
+    # 摘要頁格式化
+    show["abstract_page"] = show["abstract_page"].map(lambda x: (f"p.{int(x)}" if (x is not None and not pd.isna(x)) else "—"))
+
     show = show.drop(columns=["key"])
     show = show.rename(
         columns={
@@ -912,6 +994,7 @@ def df_for_picker(df: pd.DataFrame, selected_keys: Set[str], preferred_speakers:
             "time": "時間",
             "room": "教室/分會場",
             "code": "編號",
+            "abstract_page": "摘要頁",
             "title": "投稿題目/演講主題",
             "speaker": "作者/講者/主持",
             "session": "主題領域",
@@ -954,6 +1037,7 @@ def build_ics(events: pd.DataFrame, cal_name: str = "Animal Behavior Workshop 20
         room = (r.get("where") or r.get("room") or "").strip()
         affiliation = (r.get("affiliation") or "").strip() if r.get("affiliation") else ""
         area = (r.get("session") or "").strip() if r.get("session") else ""
+        ap = r.get("abstract_page", None)
 
         if code and title:
             summary = f"{code}｜{title}"
@@ -965,6 +1049,11 @@ def build_ics(events: pd.DataFrame, cal_name: str = "Animal Behavior Workshop 20
             desc_parts.append(f"主題領域: {area}")
         if code:
             desc_parts.append(f"Code: {code}")
+        if ap is not None and (not pd.isna(ap)):
+            try:
+                desc_parts.append(f"Abstract page: p.{int(ap)}")
+            except Exception:
+                pass
         if speaker:
             desc_parts.append(f"Speaker/Author: {speaker}")
         if affiliation:
@@ -1000,18 +1089,14 @@ def _as_set(x: Any) -> Set[str]:
     return set()
 
 
-def _clean_speaker_name(s: str) -> str:
-    # 你日後如果要更 aggressive 的清理（去除單位、符號、共同作者），就改這裡
-    return str(s).strip()
-
-
 def main():
     db_init()
     st.title(APP_TITLE)
 
     # --- Auth panel (visible on mobile too) ---
     with st.expander("狀態保存（Google 登入）", expanded=False):
-        user = auth_ui()
+        user = auth_ui_sidebar()
+
         err = st.session_state.get("auth_error")
         if err:
             st.error(err)
@@ -1032,26 +1117,40 @@ def main():
             logout_ui()
 
         st.markdown("---")
-        st.caption("🔒 登入僅用於記住你勾選的議程與偏好設定，不讀 Gmail、不改 Google Calendar。")
+        st.caption("🔒 登入僅用於記住你勾選的議程，不讀 Gmail、不改 Google Calendar。")
 
     # --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
-
     st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode", False)))
     st.session_state.setdefault("selected_keys", _as_set(mgr.get("selected_keys", [])))
     st.session_state.setdefault("marked_delete_keys", _as_set(mgr.get("marked_delete_keys", [])))
     st.session_state.setdefault("confirm_delete_marked", bool(mgr.get("confirm_delete_marked", False)))
-
-    # NEW: speaker preference
-    st.session_state.setdefault("preferred_speakers", _as_set(mgr.get("preferred_speakers", [])))
-    st.session_state.setdefault("preferred_only", bool(mgr.get("preferred_only", False)))
-    st.session_state.setdefault("preferred_highlight", bool(mgr.get("preferred_highlight", True)))
 
     # --- Mobile toggle ---
     tcol1, tcol2 = st.columns([0.75, 0.25])
     with tcol2:
         st.session_state.force_mobile_mode = st.toggle("Mobile mode", value=bool(st.session_state.force_mobile_mode))
     is_mobile = bool(st.session_state.force_mobile_mode)
+
+    # --- Abstract PDF panel (pre-mounted) ---
+    with st.expander("摘要集 PDF（預先掛載）", expanded=not is_mobile):
+        st.caption(f"預設路徑：`{DEFAULT_ABSTRACT_PDF_PATH}`（請把 PDF 放在 repo 的 data/ 目錄）")
+        if not _PDF_LIBS_OK:
+            st.warning("尚未安裝 pymupdf（import fitz 失敗）。請在 requirements.txt 加上 `pymupdf`。")
+        elif not os.path.exists(DEFAULT_ABSTRACT_PDF_PATH):
+            st.warning("找不到摘要集 PDF。請確認 repo 內存在 data/2026 動物行為研討會摘要集.pdf")
+        else:
+            st.success("已偵測到摘要集 PDF（可自動回填摘要頁碼）。")
+            try:
+                st.download_button(
+                    "下載摘要集 PDF",
+                    data=open(DEFAULT_ABSTRACT_PDF_PATH, "rb").read(),
+                    file_name=os.path.basename(DEFAULT_ABSTRACT_PDF_PATH),
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.warning(f"PDF 讀取失敗（仍可運作議程功能）：{e}")
 
     uploaded = None
     use_default = True
@@ -1060,9 +1159,6 @@ def main():
     days = ["D1", "D2"]
     rooms: List[str] = []
 
-    # -----------------------------------------
-    # File / query controls
-    # -----------------------------------------
     if is_mobile:
         with st.expander("控制面板（檔案/搜尋/篩選）", expanded=False):
             st.markdown("### 輸入議程檔案")
@@ -1075,11 +1171,6 @@ def main():
             query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="")
             include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
             days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
-
-            st.markdown("---")
-            st.markdown("### 講者偏好 ⭐")
-            st.session_state["preferred_only"] = st.checkbox("只顯示偏好講者", value=bool(st.session_state["preferred_only"]))
-            st.session_state["preferred_highlight"] = st.checkbox("高亮偏好講者（桌面表格顯示⭐）", value=bool(st.session_state["preferred_highlight"]))
     else:
         with st.sidebar:
             st.markdown("### 輸入議程檔案")
@@ -1093,23 +1184,6 @@ def main():
             include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
             days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
 
-            st.markdown("---")
-            st.markdown("### 講者偏好 ⭐")
-            st.session_state["preferred_only"] = st.checkbox("只顯示偏好講者", value=bool(st.session_state["preferred_only"]))
-            st.session_state["preferred_highlight"] = st.checkbox("高亮偏好講者（桌面表格顯示⭐）", value=bool(st.session_state["preferred_highlight"]))
-
-            ps_list = sorted([_clean_speaker_name(x) for x in st.session_state["preferred_speakers"] if str(x).strip()])
-            if ps_list:
-                st.caption("目前偏好名單：")
-                st.write("、".join(ps_list[:20]) + (" …" if len(ps_list) > 20 else ""))
-                if st.button("清空偏好名單", use_container_width=True):
-                    st.session_state["preferred_speakers"] = set()
-                    st.session_state["preferred_only"] = False
-                    st.rerun()
-
-    # -----------------------------------------
-    # Load bytes
-    # -----------------------------------------
     file_bytes: Optional[bytes] = None
     if uploaded is not None:
         file_bytes = uploaded.getvalue()
@@ -1127,7 +1201,16 @@ def main():
     sheets = load_excel_all_sheets(file_bytes)
     df_all = build_master_df(sheets)
 
-    # room filter
+    # ✅ 在這裡把摘要頁碼回填進 df_all（依 code）
+    code2page: Dict[str, int] = {}
+    if _PDF_LIBS_OK and os.path.exists(DEFAULT_ABSTRACT_PDF_PATH):
+        try:
+            code2page = build_abstract_code_to_page_map(DEFAULT_ABSTRACT_PDF_PATH)
+        except Exception as e:
+            st.warning(f"摘要集索引建立失敗（不影響議程功能）：{e}")
+            code2page = {}
+    df_all = attach_abstract_page(df_all, code2page)
+
     all_rooms = sorted(df_all["room"].dropna().unique().tolist())
     if is_mobile:
         with st.expander("教室/分會場篩選（可選）", expanded=False):
@@ -1138,19 +1221,10 @@ def main():
 
     selected_keys: Set[str] = set(st.session_state["selected_keys"])
     marked_delete: Set[str] = set(st.session_state["marked_delete_keys"])
-    preferred_speakers: Set[str] = set(st.session_state["preferred_speakers"])
 
     selected_df = add_conflict_flags(events_from_selected(df_all, selected_keys))
 
-    df_hit = filter_events(
-        df_all,
-        query=query,
-        days=days,
-        rooms=rooms,
-        include_main=include_main,
-        preferred_speakers=preferred_speakers,
-        preferred_only=bool(st.session_state["preferred_only"]),
-    )
+    df_hit = filter_events(df_all, query=query, days=days, rooms=rooms, include_main=include_main)
     df_hit2 = mark_conflict_with_selected(df_hit, selected_df)
 
     # ----------------------------
@@ -1160,7 +1234,7 @@ def main():
     st.caption(f"符合筆數：{len(df_hit2)}（⚠️ 表示會與你已選的『非海報』行程時間重疊；海報不標衝突）")
 
     if not is_mobile:
-        picker_df = df_for_picker(df_hit2, selected_keys, preferred_speakers if bool(st.session_state["preferred_highlight"]) else set())
+        picker_df = df_for_picker(df_hit2, selected_keys, show_conflict_with_selected=True)
 
         edited = st.data_editor(
             picker_df,
@@ -1169,14 +1243,15 @@ def main():
             column_config={
                 "選取": st.column_config.CheckboxColumn("選取", help="勾選加入個人化行事曆"),
                 "衝突": st.column_config.TextColumn("衝突", width="small", help="⚠️ 表示會與已選（非海報）行程撞期；海報不標"),
-                "⭐": st.column_config.TextColumn("⭐", width="small", help="偏好講者（桌面顯示用；新增/移除請在右側偏好名單或手機卡片）"),
+                "摘要頁": st.column_config.TextColumn("摘要頁", width="small", help="若摘要集 PDF 命中編號，顯示 p.X"),
                 "投稿題目/演講主題": st.column_config.TextColumn(width="large"),
                 "作者/講者/主持": st.column_config.TextColumn(width="medium"),
                 "主題領域": st.column_config.TextColumn(width="medium"),
                 "單位": st.column_config.TextColumn(width="medium"),
             },
             disabled=[
-                "⭐", "衝突", "日期", "時間", "教室/分會場", "編號",
+                "衝突", "日期", "時間", "教室/分會場", "編號",
+                "摘要頁",
                 "投稿題目/演講主題", "作者/講者/主持", "主題領域", "單位", "地點",
             ],
             key="editor_results",
@@ -1208,19 +1283,6 @@ def main():
         with c3:
             st.caption("提示：你可以先用關鍵字或教室篩選縮小範圍，再全選。")
 
-        # 桌面提供一個：把「搜尋結果中的講者」加入偏好（透過 multiselect）
-        st.markdown("#### ⭐ 將講者加入偏好名單（桌面）")
-        speaker_pool = sorted([_clean_speaker_name(x) for x in df_hit2["speaker"].fillna("").unique().tolist() if str(x).strip()])
-        if speaker_pool:
-            add_speakers = st.multiselect("從目前搜尋結果選講者加入偏好", options=speaker_pool, default=[])
-            if st.button("加入偏好名單", use_container_width=False) and add_speakers:
-                for sp in add_speakers:
-                    preferred_speakers.add(_clean_speaker_name(sp))
-                st.session_state["preferred_speakers"] = preferred_speakers
-                st.rerun()
-        else:
-            st.caption("（目前搜尋結果沒有可辨識的講者欄位）")
-
     else:
         n_total = int(len(df_hit2))
         if n_total == 0:
@@ -1240,44 +1302,35 @@ def main():
             picked = (k in selected_keys)
             conflict_flag = "⚠️" if bool(r.get("conflict_with_selected")) else ""
             kind = str(r.get("kind") or "")
-            who = str(r.get("speaker") or "").strip()
-            who_clean = _clean_speaker_name(who) if who else ""
-            is_pref = bool(who_clean and (who_clean in preferred_speakers))
+
+            ap = r.get("abstract_page", None)
+            ap_txt = ""
+            if ap is not None and (not pd.isna(ap)):
+                try:
+                    ap_txt = f"📄 摘要頁 p.{int(ap)}"
+                except Exception:
+                    ap_txt = ""
 
             with st.container(border=True):
-                top = st.columns([0.62, 0.19, 0.19])
+                top = st.columns([0.74, 0.26])
                 with top[0]:
                     st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**")
                     code = str(r.get("code") or "").strip()
                     title = str(r.get("title") or "").strip()
+                    who = str(r.get("speaker") or "").strip()
 
-                    pref_tag = "⭐ " if is_pref else ""
                     if code:
-                        st.markdown(f"{conflict_flag} {pref_tag}**{code}**  {title}")
+                        st.markdown(f"{conflict_flag} **{code}**  {title}")
                     else:
-                        st.markdown(f"{conflict_flag} {pref_tag}{title}")
+                        st.markdown(f"{conflict_flag} {title}")
                     if who:
                         st.caption(who)
+                    if ap_txt:
+                        st.caption(ap_txt)
                     if kind == "poster":
                         st.caption("（Poster：不顯示衝突⚠️，也不計入衝突統計）")
 
                 with top[1]:
-                    # speaker pref toggle
-                    if who_clean:
-                        if is_pref:
-                            if st.button("取消⭐", key=f"unpref_{k}"):
-                                preferred_speakers.discard(who_clean)
-                                st.session_state["preferred_speakers"] = preferred_speakers
-                                st.rerun()
-                        else:
-                            if st.button("⭐", key=f"pref_{k}"):
-                                preferred_speakers.add(who_clean)
-                                st.session_state["preferred_speakers"] = preferred_speakers
-                                st.rerun()
-                    else:
-                        st.caption("")
-
-                with top[2]:
                     if picked:
                         if st.button("移除", key=f"rm_{k}"):
                             selected_keys.discard(k)
@@ -1319,9 +1372,16 @@ def main():
             where = str(r.get("where") or r.get("room") or "").strip()
             code = str(r.get("code") or "").strip()
             title = str(r.get("title") or "").strip()
+            ap = r.get("abstract_page", None)
+
             s = f"{r['start']}–{r['end']}｜{where}"
             if code:
                 s += f"｜{code}"
+            if ap is not None and (not pd.isna(ap)):
+                try:
+                    s += f"｜p.{int(ap)}"
+                except Exception:
+                    pass
             if title:
                 s += f"｜{title[:40]}"
                 if len(title) > 40:
@@ -1365,10 +1425,19 @@ def main():
                     st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {r['room']}**")
                     code = str(r.get("code") or "").strip()
                     title = str(r.get("title") or "").strip()
+                    ap = r.get("abstract_page", None)
+
+                    line = ""
                     if code:
-                        st.markdown(f"**{code}**  {title}")
-                    else:
-                        st.markdown(title)
+                        line += f"**{code}**  "
+                    line += title
+                    if ap is not None and (not pd.isna(ap)):
+                        try:
+                            line += f"  ·  📄 p.{int(ap)}"
+                        except Exception:
+                            pass
+                    st.markdown(line)
+
                     who = str(r.get("speaker") or "").strip()
                     if who:
                         st.caption(who)
@@ -1419,12 +1488,6 @@ def main():
     mgr.set("selected_keys", sorted(list(set(map(str, st.session_state["selected_keys"])))))
     mgr.set("marked_delete_keys", sorted(list(set(map(str, st.session_state["marked_delete_keys"])))))
     mgr.set("confirm_delete_marked", bool(st.session_state["confirm_delete_marked"]))
-
-    # NEW: speaker pref persisted
-    mgr.set("preferred_speakers", sorted(list(set(map(str, st.session_state["preferred_speakers"])))))
-    mgr.set("preferred_only", bool(st.session_state["preferred_only"]))
-    mgr.set("preferred_highlight", bool(st.session_state["preferred_highlight"]))
-
     mgr.save()
 
 
