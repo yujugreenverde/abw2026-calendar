@@ -36,6 +36,8 @@ DEFAULT_EXCEL_PATH = "2026 動行議程.xlsx"
 
 # ✅ 摘要集 PDF：預設 repo 內掛載路徑（你要把 PDF 放在這裡）
 DEFAULT_ABSTRACT_PDF_PATH = os.path.join("data", "2026 動物行為研討會摘要集.pdf")
+# ✅ 摘要索引：只從第 34 頁開始（人類頁碼）
+ABSTRACT_INDEX_START_PAGE_1IDX = 34
 
 DATE_MAP = {
     "D1": dt.date(2026, 1, 26),
@@ -811,7 +813,9 @@ def build_abstract_code_to_page_map(pdf_path: str) -> Dict[str, int]:
     pat = re.compile(r"\b(P[A-Z]\d{2}|[A-Z]{1,2}\d{2,4})\b")
 
     m: Dict[str, int] = {}
-    for i in range(doc.page_count):
+    start_i = max(0, ABSTRACT_INDEX_START_PAGE_1IDX - 1)  # 34頁(1-index) -> 33(0-index)
+    for i in range(start_i, doc.page_count):
+
         text = doc.load_page(i).get_text("text") or ""
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
