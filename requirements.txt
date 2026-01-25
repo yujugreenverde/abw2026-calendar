@@ -4,3 +4,4 @@ openpyxl
 google-auth
 google-auth-oauthlib
 pymupdf
+PyPDF2
