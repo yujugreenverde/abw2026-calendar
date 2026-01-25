@@ -1137,6 +1137,15 @@ def main():
     
     st.markdown("---")
 
+    # ✅ 場地 / 分會場篩選（往上移）
+    all_rooms = sorted(df_all["room"].dropna().unique().tolist())
+    if is_mobile:
+        with st.expander("教室/分會場篩選（可選）", expanded=False):
+            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
+    else:
+        with st.sidebar:
+            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
+
     # --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
     st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode",True)))
@@ -1219,13 +1228,7 @@ def main():
             code2page = {}
     df_all = attach_abstract_page(df_all, code2page)
 
-    all_rooms = sorted(df_all["room"].dropna().unique().tolist())
-    if is_mobile:
-        with st.expander("教室/分會場篩選（可選）", expanded=False):
-            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
-    else:
-        with st.sidebar:
-            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
+    
 
     selected_keys: Set[str] = set(st.session_state["selected_keys"])
     marked_delete: Set[str] = set(st.session_state["marked_delete_keys"])
