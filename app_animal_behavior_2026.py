@@ -51,6 +51,14 @@ from typing import Dict, Tuple, Optional, List, Set, Any
 import pandas as pd
 import streamlit as st
 
+# --- v2.4 add: PDF text search fallback ---
+try:
+    import fitz  # PyMuPDF
+    _PDF_TEXT_OK = True
+except Exception:
+    fitz = None
+    _PDF_TEXT_OK = False
+
 APP_TITLE = "2026 動物行為暨生態研討會｜議程搜尋＋個人化行事曆"
 DEFAULT_EXCEL_PATH = "2026 動行議程.xlsx"
 
@@ -1158,6 +1166,125 @@ def build_pdf_src(pdf_url: str,
         return base + f"&page={p}" if "page=" not in base else base
     return base + f"#page={p}"
 
+# ============================================================
+# v2.4: PDF fallback page search (text-layer only, no OCR)
+# ============================================================
+
+@st.cache_data(show_spinner=False)
+def _pdf_build_page_text_index(pdf_bytes: bytes,
+                               max_pages: int = 2000,
+                               max_chars_per_page: int = 120_000) -> List[str]:
+    """
+    Build per-page text index (0-based list, page_texts[i] corresponds to page i+1).
+    Text-layer only. If pdf is scanned images, text may be empty.
+    """
+    if not _PDF_TEXT_OK:
+        return []
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page_texts: List[str] = []
+    try:
+        n = min(doc.page_count, int(max_pages))
+        for i in range(n):
+            try:
+                txt = doc.load_page(i).get_text("text") or ""
+            except Exception:
+                txt = ""
+            txt = txt.replace("\x00", " ")
+            if len(txt) > max_chars_per_page:
+                txt = txt[:max_chars_per_page]
+            page_texts.append(txt)
+    finally:
+        doc.close()
+    return page_texts
+
+
+def _tokenize_query(s: str) -> List[str]:
+    s = re.sub(r"\s+", " ", (s or "").strip())
+    if not s:
+        return []
+    # keep short tokens too for codes
+    return [t for t in re.split(r"\s+", s) if t]
+
+
+def _find_page_in_text_index(page_texts: List[str], query: str) -> Optional[int]:
+    """
+    Return 1-based page number if found, else None.
+    Simple AND match across tokens; also tries raw substring match first.
+    """
+    if not page_texts:
+        return None
+    q = (query or "").strip()
+    if not q:
+        return None
+
+    q_low = q.lower()
+
+    # 1) direct substring
+    for i, txt in enumerate(page_texts):
+        if q_low in (txt or "").lower():
+            return i + 1
+
+    # 2) token AND match
+    tokens = _tokenize_query(q_low)
+    if not tokens:
+        return None
+    for i, txt in enumerate(page_texts):
+        t = (txt or "").lower()
+        ok = True
+        for tok in tokens:
+            if tok not in t:
+                ok = False
+                break
+        if ok:
+            return i + 1
+    return None
+
+
+def pdf_fallback_find_page_for_event(r: pd.Series,
+                                    page_texts: List[str]) -> Tuple[Optional[int], str]:
+    """
+    Try to find the abstract page in PDF when index has no page.
+    Strategy (first hit wins):
+      1) code
+      2) speaker
+      3) title (first 6~8 words)
+    Return: (page, reason)
+    """
+    if not page_texts:
+        return None, "PDF 未建立文字索引（可能未上傳或缺少 PyMuPDF）"
+
+    code = str(r.get("code") or "").strip()
+    speaker = str(r.get("speaker") or "").strip()
+    title = str(r.get("title") or "").strip()
+
+    # 1) code
+    if code:
+        p = _find_page_in_text_index(page_texts, code)
+        if p:
+            return p, f"用 code 命中：{code}"
+
+    # 2) speaker (trim very long)
+    if speaker:
+        sp = speaker
+        if len(sp) > 80:
+            sp = sp[:80]
+        p = _find_page_in_text_index(page_texts, sp)
+        if p:
+            return p, f"用作者/講者命中：{sp}"
+
+    # 3) title prefix
+    if title:
+        words = _tokenize_query(title)
+        if len(words) >= 6:
+            q = " ".join(words[:8])
+        else:
+            q = title
+        p = _find_page_in_text_index(page_texts, q)
+        if p:
+            return p, "用標題片段命中"
+
+    return None, "找不到（可能是掃描圖 PDF 或 PDF 文字層不含此段）"
 
 # ============================================================
 # Main app
@@ -1342,12 +1469,23 @@ def main():
     # MVP: PDF source
     # ----------------------------
     pdf_data_uri = None
+    pdf_page_texts: List[str] = []
+    
     if pdf_upload is not None:
         try:
-            pdf_data_uri = make_pdf_data_uri(pdf_upload.getvalue())
+            _pdf_bytes = pdf_upload.getvalue()
+            pdf_data_uri = make_pdf_data_uri(_pdf_bytes)
+    
+            # v2.4: build text index for fallback search (only if PyMuPDF is available)
+            if _PDF_TEXT_OK:
+                pdf_page_texts = _pdf_build_page_text_index(_pdf_bytes)
+            else:
+                pdf_page_texts = []
+    
         except Exception as e:
             st.error(f"PDF 上傳處理失敗：{e}")
             pdf_data_uri = None
+            pdf_page_texts = []
 
     # allow manual jump page
     if manual_jump_page is not None:
@@ -1434,14 +1572,23 @@ def main():
                 st.session_state["_abstract_expand"][k] = (not exp_state)
                 st.rerun()
         with c3:
-            # jump to pdf by abstract page if available
-            if abs_page and isinstance(abs_page, int) and abs_page > 0:
-                if st.button(f"📄 跳到第 {abs_page} 頁", key=f"pdf_{k}"):
-                    st.session_state["pdf_page"] = int(abs_page)
+        # v2.4: jump to pdf by abstract page if available, else fallback search within PDF text
+        if abs_page and isinstance(abs_page, int) and abs_page > 0:
+            if st.button(f"📄 跳到第 {abs_page} 頁", key=f"pdf_{k}"):
+                st.session_state["pdf_page"] = int(abs_page)
+                st.session_state["last_preview_key"] = k
+                st.rerun()
+        else:
+            # fallback button (only meaningful if pdf_page_texts exists)
+            if st.button("🔍 從 PDF 找頁", key=f"pdf_find_{k}"):
+                p, reason = pdf_fallback_find_page_for_event(r, pdf_page_texts)
+                if p and isinstance(p, int) and p > 0:
+                    st.session_state["pdf_page"] = int(p)
                     st.session_state["last_preview_key"] = k
+                    st.toast(f"已定位到第 {p} 頁｜{reason}")
                     st.rerun()
-            else:
-                st.caption("📄（無頁碼）")
+                else:
+                    st.warning(f"找不到頁碼：{reason}")
         with c4:
             # optional manual jump with number input per card (lightweight)
             if compact:
