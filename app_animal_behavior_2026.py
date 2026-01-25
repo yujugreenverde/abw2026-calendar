@@ -1189,7 +1189,7 @@ def main():
     rooms: List[str] = []
 
     if is_mobile:
-        with st.expander("輸入議程檔案）", expanded=False):
+        with st.expander("議程檔案 (預先掛載)", expanded=False):
             st.markdown("### 輸入議程檔案")
             uploaded = st.file_uploader("上傳 Excel（.xlsx）", type=["xlsx"])
             use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
