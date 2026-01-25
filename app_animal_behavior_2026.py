@@ -1137,6 +1137,9 @@ def main():
     
     st.markdown("---")
 
+    sheets = load_excel_all_sheets(file_bytes)
+    df_all = build_master_df(sheets)
+    
     # ✅ 場地 / 分會場篩選（往上移）
     all_rooms = sorted(df_all["room"].dropna().unique().tolist())
     if is_mobile:
@@ -1215,8 +1218,7 @@ def main():
         st.info("請上傳 Excel 檔，或勾選使用預設檔案。")
         st.stop()
 
-    sheets = load_excel_all_sheets(file_bytes)
-    df_all = build_master_df(sheets)
+   
 
     # ✅ 在這裡把摘要頁碼回填進 df_all（依 code）
     code2page: Dict[str, int] = {}
