@@ -1122,24 +1122,10 @@ def main():
 
         st.markdown("---")
         st.caption("🔒 登入僅用於記住你勾選的議程，不讀 Gmail、不改 Google Calendar。")
-    # ✅ 搜尋欄：獨立區塊（放在登入之後）
-    st.markdown("### 🔎 搜尋")
-    qcol1, qcol2, qcol3 = st.columns([0.62, 0.22, 0.16])
-    
-    with qcol1:
-        query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="", placeholder="例：社會學習  或  PA01  或  講者名字")
-    
-    with qcol2:
-        days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
-    
-    with qcol3:
-        include_main = st.checkbox("含大會", value=True, help="包含『大會議程』主表事件（報到/開幕等）")
-    
-    st.markdown("---")
 
     # --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
-    st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode",True)))
+    st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode", False)))
     st.session_state.setdefault("selected_keys", _as_set(mgr.get("selected_keys", [])))
     st.session_state.setdefault("marked_delete_keys", _as_set(mgr.get("marked_delete_keys", [])))
     st.session_state.setdefault("confirm_delete_marked", bool(mgr.get("confirm_delete_marked", False)))
@@ -1184,6 +1170,11 @@ def main():
             use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
             st.caption("預設檔案：" + DEFAULT_EXCEL_PATH)
 
+            st.markdown("---")
+            st.markdown("### 搜尋與篩選")
+            query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="")
+            include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
+            days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
     else:
         with st.sidebar:
             st.markdown("### 輸入議程檔案")
@@ -1191,6 +1182,11 @@ def main():
             use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
             st.caption("預設檔案：" + DEFAULT_EXCEL_PATH)
 
+            st.markdown("---")
+            st.markdown("### 搜尋與篩選")
+            query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="")
+            include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
+            days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
 
     file_bytes: Optional[bytes] = None
     if uploaded is not None:
