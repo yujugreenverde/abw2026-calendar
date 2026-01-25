@@ -1572,23 +1572,23 @@ def main():
                 st.session_state["_abstract_expand"][k] = (not exp_state)
                 st.rerun()
         with c3:
-        # v2.4: jump to pdf by abstract page if available, else fallback search within PDF text
-        if abs_page and isinstance(abs_page, int) and abs_page > 0:
-            if st.button(f"📄 跳到第 {abs_page} 頁", key=f"pdf_{k}"):
-                st.session_state["pdf_page"] = int(abs_page)
-                st.session_state["last_preview_key"] = k
-                st.rerun()
-        else:
-            # fallback button (only meaningful if pdf_page_texts exists)
-            if st.button("🔍 從 PDF 找頁", key=f"pdf_find_{k}"):
-                p, reason = pdf_fallback_find_page_for_event(r, pdf_page_texts)
-                if p and isinstance(p, int) and p > 0:
-                    st.session_state["pdf_page"] = int(p)
+            # v2.4: jump to pdf by abstract page if available, else fallback search within PDF text
+            if abs_page and isinstance(abs_page, int) and abs_page > 0:
+                if st.button(f"📄 跳到第 {abs_page} 頁", key=f"pdf_{k}"):
+                    st.session_state["pdf_page"] = int(abs_page)
                     st.session_state["last_preview_key"] = k
-                    st.toast(f"已定位到第 {p} 頁｜{reason}")
                     st.rerun()
-                else:
-                    st.warning(f"找不到頁碼：{reason}")
+            else:
+                # fallback button (only meaningful if pdf_page_texts exists)
+                if st.button("🔍 從 PDF 找頁", key=f"pdf_find_{k}"):
+                    p, reason = pdf_fallback_find_page_for_event(r, pdf_page_texts)
+                    if p and isinstance(p, int) and p > 0:
+                        st.session_state["pdf_page"] = int(p)
+                        st.session_state["last_preview_key"] = k
+                        st.toast(f"已定位到第 {p} 頁｜{reason}")
+                        st.rerun()
+                    else:
+                        st.warning(f"找不到頁碼：{reason}")
         with c4:
             # optional manual jump with number input per card (lightweight)
             if compact:
