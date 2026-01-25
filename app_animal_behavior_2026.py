@@ -1145,15 +1145,7 @@ def main():
 
     
     
-    # ✅ 場地 / 分會場篩選（往上移）
-    all_rooms = sorted(df_all["room"].dropna().unique().tolist())
-    if is_mobile:
-        with st.expander("教室/分會場篩選（可選）", expanded=False):
-            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
-    else:
-        with st.sidebar:
-            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
-
+    
     # --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
     st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode",True)))
@@ -1226,6 +1218,16 @@ def main():
     # ⬇⬇⬇ 這裡「完全不要多縮排」
     sheets = load_excel_all_sheets(file_bytes)
     df_all = build_master_df(sheets)
+
+    # ✅ 場地 / 分會場篩選（往上移）
+    all_rooms = sorted(df_all["room"].dropna().unique().tolist())
+    if is_mobile:
+        with st.expander("教室/分會場篩選（可選）", expanded=False):
+            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
+    else:
+        with st.sidebar:
+            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
+
 
     # ✅ 在這裡把摘要頁碼回填進 df_all（依 code）
     code2page: Dict[str, int] = {}
