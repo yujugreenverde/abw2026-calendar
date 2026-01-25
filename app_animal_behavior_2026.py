@@ -54,7 +54,7 @@ APP_TITLE = "2026 動物行為暨生態研討會｜議程搜尋＋個人化行�
 DEFAULT_EXCEL_PATH = "2026 動行議程.xlsx"
 
 # ✅ 預載 PDF（掛載在 Streamlit Cloud/本地專案時，請把檔案放到專案可讀路徑）
-DEFAULT_PDF_PATH = "/mnt/data/2026 動物行為研討會摘要集.pdf"
+DEFAULT_PDF_PATH = "2026 動物行為研討會摘要集.pdf"
 # 預載 PDF：會依序嘗試下列路徑（先找到先用）
 # - Streamlit Cloud：請把 PDF 放進 repo（與 app 同層或 static/ 資料夾）
 # - 本機：可用絕對路徑
