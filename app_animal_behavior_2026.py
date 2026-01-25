@@ -1122,6 +1122,12 @@ def main():
 
         st.markdown("---")
         st.caption("🔒 登入僅用於記住你勾選的議程，不讀 Gmail、不改 Google Calendar。")
+
+    query = ""
+    include_main = True
+    days = ["D1", "D2"]
+    rooms: List[str] = []
+
     # ✅ 搜尋欄：獨立區塊（放在登入之後）
     st.markdown("### 🔎 搜尋")
     qcol1, qcol2, qcol3 = st.columns([0.62, 0.22, 0.16])
@@ -1137,8 +1143,7 @@ def main():
     
     st.markdown("---")
 
-    sheets = load_excel_all_sheets(file_bytes)
-    df_all = build_master_df(sheets)
+    
     
     # ✅ 場地 / 分會場篩選（往上移）
     all_rooms = sorted(df_all["room"].dropna().unique().tolist())
@@ -1218,7 +1223,8 @@ def main():
         st.info("請上傳 Excel 檔，或勾選使用預設檔案。")
         st.stop()
 
-   
+   sheets = load_excel_all_sheets(file_bytes)
+    df_all = build_master_df(sheets)
 
     # ✅ 在這裡把摘要頁碼回填進 df_all（依 code）
     code2page: Dict[str, int] = {}
