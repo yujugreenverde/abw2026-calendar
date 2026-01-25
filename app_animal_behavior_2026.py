@@ -1,39 +1,18 @@
-# app_animal_behavior_2026_oauth_A_full_v2_3_mvp_abstract_expand_pdf_jump.py
+# app_animal_behavior_2026_oauth_full_v2_5_pdf_search.py
 # ------------------------------------------------------------
-# 版本變更說明（覆蓋版｜v2.3｜MVP：展開摘要＋PDF跳頁）
-# 1) ✅ 保留你現有 Excel 解析（大會議程/分會場/海報）、衝突規則、.ics 匯出、原始分頁 tabs、Google OAuth / SQLite 狀態保存。
-# 2) ✅ 新增「摘要索引」支援（MVP）：
-#    - 可上傳摘要索引 CSV / Excel（或把「摘要索引」分頁放在同一支 Excel 內）
-#    - 以 code（優先）或 key 對應每筆議程的 abstract_text / abstract_page
-# 3) ✅ 新增「PDF 摘要集」顯示（MVP）：
-#    - 支援：上傳 PDF（內嵌顯示）或填入 PDF URL（iframe 顯示）
-#    - 搜尋結果：每筆可「展開摘要」＋「跳到 PDF 指定頁」
-#    - Desktop：保留 data_editor 選取；另提供「結果詳情（可展開摘要/跳頁）」選擇器（避免在 data_editor 內做困難的逐列按鈕）
+# 覆蓋版｜v2.5｜MVP：預載摘要PDF＋以「人名/報告編號」在PDF內找摘要並跳頁
+# 版本變更說明：
+# 1) ✅ 移除「摘要索引匯入」功能（你說不需要）。
+# 2) ✅ 預設預載摘要集 PDF（支援：掛載檔案路徑 / 上傳覆蓋 / URL）。
+# 3) ✅ 以「報告編號（優先）」或「作者/講者」在 PDF 文字中搜尋可能頁碼（不做 OCR）。
+# 4) ✅ 搜尋列與日期選擇：移到主畫面上方，不再放在折疊頁。
+# 5) ✅ 預設 Mobile mode = ON（仍可手動切換）。
 #
-# ✅ MVP 定義：
-# - 不做 OCR、不從 PDF 解析摘要內容（摘要文字必須來自索引檔）
-# - 展開摘要 = 顯示索引中的 abstract_text
-# - 跳頁 = 更新 PDF iframe 的 page
-#
+# 注意：
+# - PDF 內搜尋仰賴 PDF 本身含可擷取文字（非純掃描圖）。若是掃描圖，本 MVP 不會做 OCR。
+# - PDF 內嵌採 base64 data-uri；若 PDF 很大，第一次載入會比較慢（之後 cache）。
 # ------------------------------------------------------------
-# 摘要索引檔格式（建議）
-# 你可以用 CSV 或 Excel（第一個分頁）：
-# - code: (可空) 例如 S101-03 / PA12 / 等
-# - key:  (可空) 對應本工具 mdf["key"]（若沒有 code 就用 key）
-# - page: (可空) PDF頁碼（整數）
-# - abstract_text: 摘要文字（可空）
-#
-# 對應規則：
-# 1) 若該議程有 code 且索引中有同 code → 使用該筆
-# 2) 否則若索引中有同 key → 使用該筆
-# 3) 否則顯示「（尚無摘要索引）」；PDF 仍可用手動頁碼跳頁
-#
-# ------------------------------------------------------------
-# Streamlit Cloud 注意
-# - 本檔預設用 SQLite（user_state.db）保存；在 Streamlit Cloud 有機率在重啟/重新部署後被重置。
-# - 若你要「真正跨重啟仍保留」，請把 db_save_state/db_load_state 換成 Supabase/Postgres/Firebase。
-#
-# ------------------------------------------------------------
+
 from __future__ import annotations
 
 import os
@@ -51,16 +30,11 @@ from typing import Dict, Tuple, Optional, List, Set, Any
 import pandas as pd
 import streamlit as st
 
-# --- v2.4 add: PDF text search fallback ---
-try:
-    import fitz  # PyMuPDF
-    _PDF_TEXT_OK = True
-except Exception:
-    fitz = None
-    _PDF_TEXT_OK = False
-
 APP_TITLE = "2026 動物行為暨生態研討會｜議程搜尋＋個人化行事曆"
 DEFAULT_EXCEL_PATH = "2026 動行議程.xlsx"
+
+# ✅ 預載摘要集 PDF（Streamlit Cloud 掛載路徑可放在 repo 根目錄）
+DEFAULT_ABSTRACT_PDF_PATH = "2026 動物行為研討會摘要集.pdf"
 
 DATE_MAP = {
     "D1": dt.date(2026, 1, 26),
@@ -850,23 +824,23 @@ def add_conflict_flags(selected_df: pd.DataFrame) -> pd.DataFrame:
         active_idx = None
 
         for idx, r in sub.iterrows():
-            s = r["start_dt"]
-            e = r["end_dt"]
+            sdt = r["start_dt"]
+            edt = r["end_dt"]
 
             if active_end is None:
-                active_end = e
+                active_end = edt
                 active_idx = idx
                 continue
 
-            if s < active_end:
+            if sdt < active_end:
                 df.loc[idx, "conflict"] = True
                 if active_idx is not None:
                     df.loc[active_idx, "conflict"] = True
-                if e > active_end:
-                    active_end = e
+                if edt > active_end:
+                    active_end = edt
                     active_idx = idx
             else:
-                active_end = e
+                active_end = edt
                 active_idx = idx
 
     return df
@@ -1025,132 +999,22 @@ def _as_set(x: Any) -> Set[str]:
 
 
 # ============================================================
-# MVP: Abstract index + PDF viewer
+# PDF helpers: embed + text search (no OCR)
 # ============================================================
-
-def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df2 = df.copy()
-    df2.columns = [str(c).strip() for c in df2.columns]
-    return df2
-
-
-@st.cache_data(show_spinner=False)
-def load_abstract_index_from_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    name = (filename or "").lower()
-    bio = io.BytesIO(file_bytes)
-    if name.endswith(".csv"):
-        df = pd.read_csv(bio)
-    elif name.endswith(".xlsx") or name.endswith(".xls"):
-        df = pd.read_excel(bio)
-    else:
-        # best effort: try excel then csv
-        try:
-            df = pd.read_excel(bio)
-        except Exception:
-            bio.seek(0)
-            df = pd.read_csv(bio)
-    df = _normalize_cols(df)
-    # allow a few common aliases
-    rename_map = {}
-    for c in df.columns:
-        cl = c.lower()
-        if cl in ("abstract", "摘要", "摘要內容", "內容"):
-            rename_map[c] = "abstract_text"
-        if cl in ("page", "頁碼", "頁", "p"):
-            rename_map[c] = "page"
-        if cl in ("code", "編號", "poster_code", "talk_code"):
-            rename_map[c] = "code"
-        if cl in ("key", "event_key"):
-            rename_map[c] = "key"
-    if rename_map:
-        df = df.rename(columns=rename_map)
-
-    # keep only relevant columns if present
-    keep = [c for c in ["code", "key", "page", "abstract_text"] if c in df.columns]
-    if keep:
-        df = df[keep].copy()
-    else:
-        df = df.copy()
-
-    # sanitize
-    if "code" in df.columns:
-        df["code"] = df["code"].map(lambda x: str(x).strip() if pd.notna(x) else "")
-    if "key" in df.columns:
-        df["key"] = df["key"].map(lambda x: str(x).strip() if pd.notna(x) else "")
-    if "page" in df.columns:
-        def _to_int(v):
-            if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
-                return None
-            s = str(v).strip()
-            if not s:
-                return None
-            try:
-                return int(float(s))
-            except Exception:
-                return None
-        df["page"] = df["page"].map(_to_int)
-    if "abstract_text" in df.columns:
-        df["abstract_text"] = df["abstract_text"].map(lambda x: str(x).strip() if pd.notna(x) else "")
-
-    return df
-
-
-def build_abstract_maps(abs_df: pd.DataFrame) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
-    """
-    Return:
-      - by_code: code -> {"page": int|None, "abstract_text": str}
-      - by_key:  key  -> {"page": int|None, "abstract_text": str}
-    """
-    by_code: Dict[str, Dict[str, Any]] = {}
-    by_key: Dict[str, Dict[str, Any]] = {}
-    if abs_df is None or len(abs_df) == 0:
-        return by_code, by_key
-
-    for _, r in abs_df.iterrows():
-        code = str(r.get("code", "") or "").strip()
-        key = str(r.get("key", "") or "").strip()
-        page = r.get("page", None)
-        txt = str(r.get("abstract_text", "") or "").strip()
-
-        payload = {"page": page if isinstance(page, int) else None, "abstract_text": txt}
-
-        if code:
-            # keep first non-empty, or prefer one that has abstract_text/page
-            if code not in by_code or (payload["abstract_text"] and not by_code[code].get("abstract_text")):
-                by_code[code] = payload
-        if key:
-            if key not in by_key or (payload["abstract_text"] and not by_key[key].get("abstract_text")):
-                by_key[key] = payload
-
-    return by_code, by_key
-
-
-def resolve_abstract_for_event(event_row: pd.Series,
-                              by_code: Dict[str, Dict[str, Any]],
-                              by_key: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    code = str(event_row.get("code") or "").strip()
-    key = str(event_row.get("key") or "").strip()
-    if code and code in by_code:
-        return by_code[code]
-    if key and key in by_key:
-        return by_key[key]
-    return {"page": None, "abstract_text": ""}
-
 
 def pdf_iframe_html(src: str, height: int = 650) -> str:
     return f'<iframe src="{src}" width="100%" height="{int(height)}" style="border: 1px solid rgba(49,51,63,0.15); border-radius: 8px;"></iframe>'
 
 
-def make_pdf_data_uri(pdf_bytes: bytes) -> str:
+@st.cache_data(show_spinner=False)
+def make_pdf_data_uri_cached(pdf_bytes: bytes) -> str:
     b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-    # use #toolbar=1 to keep basic UI in many browsers
     return f"data:application/pdf;base64,{b64}"
 
 
 def build_pdf_src(pdf_url: str,
                   pdf_data_uri: Optional[str],
                   page: Optional[int]) -> Optional[str]:
-    # prefer uploaded PDF if exists
     base = None
     if pdf_data_uri:
         base = pdf_data_uri
@@ -1161,130 +1025,110 @@ def build_pdf_src(pdf_url: str,
 
     p = int(page) if (page is not None and isinstance(page, int) and page > 0) else 1
 
-    # If url already has #, append safely
     if "#" in base:
-        return base + f"&page={p}" if "page=" not in base else base
+        # 對 data-uri 來說 #page= 可以直接 append
+        if re.search(r"(#|&)page=\d+", base):
+            return base
+        joiner = "&" if "?" in base or "&" in base else ""
+        return base + joiner + f"#page={p}"
     return base + f"#page={p}"
 
-# ============================================================
-# v2.4: PDF fallback page search (text-layer only, no OCR)
-# ============================================================
 
-@st.cache_data(show_spinner=False)
-def _pdf_build_page_text_index(pdf_bytes: bytes,
-                               max_pages: int = 2000,
-                               max_chars_per_page: int = 120_000) -> List[str]:
+# Try import PyPDF2 (preferred lightweight)
+try:
+    from PyPDF2 import PdfReader  # type: ignore
+    _PDF_READER_OK = True
+except Exception:
+    _PDF_READER_OK = False
+
+
+@st.cache_data(show_spinner=True)
+def extract_pdf_text_pages(pdf_bytes: bytes, max_pages: int = 2500) -> List[str]:
     """
-    Build per-page text index (0-based list, page_texts[i] corresponds to page i+1).
-    Text-layer only. If pdf is scanned images, text may be empty.
+    Return list of per-page text (1-indexed conceptually, but we store 0-index list).
+    No OCR. Works only if PDF pages contain extractable text.
     """
-    if not _PDF_TEXT_OK:
+    if not _PDF_READER_OK:
         return []
 
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page_texts: List[str] = []
-    try:
-        n = min(doc.page_count, int(max_pages))
-        for i in range(n):
-            try:
-                txt = doc.load_page(i).get_text("text") or ""
-            except Exception:
-                txt = ""
-            txt = txt.replace("\x00", " ")
-            if len(txt) > max_chars_per_page:
-                txt = txt[:max_chars_per_page]
-            page_texts.append(txt)
-    finally:
-        doc.close()
-    return page_texts
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    texts: List[str] = []
+    n = min(len(reader.pages), int(max_pages))
+    for i in range(n):
+        try:
+            t = reader.pages[i].extract_text() or ""
+        except Exception:
+            t = ""
+        # normalize whitespace to make matching robust
+        t = re.sub(r"\s+", " ", t).strip()
+        texts.append(t)
+    return texts
 
 
-def _tokenize_query(s: str) -> List[str]:
-    s = re.sub(r"\s+", " ", (s or "").strip())
-    if not s:
-        return []
-    # keep short tokens too for codes
-    return [t for t in re.split(r"\s+", s) if t]
+def _norm_query(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 
-def _find_page_in_text_index(page_texts: List[str], query: str) -> Optional[int]:
+def find_pdf_pages_for_code_or_name(
+    pdf_pages_text: List[str],
+    code: str,
+    name: str,
+    max_hits: int = 8,
+) -> List[int]:
     """
-    Return 1-based page number if found, else None.
-    Simple AND match across tokens; also tries raw substring match first.
+    Search PDF pages for:
+      1) code (exact-ish, ignoring spaces and hyphen variants)
+      2) name tokens (AND within page)
+    Return pages as 1-indexed list.
     """
-    if not page_texts:
-        return None
-    q = (query or "").strip()
-    if not q:
-        return None
+    hits: List[int] = []
+    if not pdf_pages_text:
+        return hits
 
-    q_low = q.lower()
+    # --- code search (priority) ---
+    c = (code or "").strip()
+    if c:
+        c_norm = re.sub(r"[\s\-–—_]+", "", c).upper()
+        for i, txt in enumerate(pdf_pages_text):
+            if not txt:
+                continue
+            t_norm = re.sub(r"[\s\-–—_]+", "", txt).upper()
+            if c_norm and c_norm in t_norm:
+                hits.append(i + 1)
+                if len(hits) >= max_hits:
+                    return hits
 
-    # 1) direct substring
-    for i, txt in enumerate(page_texts):
-        if q_low in (txt or "").lower():
-            return i + 1
+    # --- name search ---
+    n = (name or "").strip()
+    if n:
+        toks = [t for t in re.split(r"\s+", n) if t]
+        # if chinese name without spaces, keep as one token
+        if len(toks) == 0 and n:
+            toks = [n]
+        toks_low = [t.lower() for t in toks if len(t) >= 2]
+        for i, txt in enumerate(pdf_pages_text):
+            if not txt:
+                continue
+            low = txt.lower()
+            ok = True
+            for tok in toks_low:
+                if tok not in low:
+                    ok = False
+                    break
+            if ok and toks_low:
+                hits.append(i + 1)
+                if len(hits) >= max_hits:
+                    break
 
-    # 2) token AND match
-    tokens = _tokenize_query(q_low)
-    if not tokens:
-        return None
-    for i, txt in enumerate(page_texts):
-        t = (txt or "").lower()
-        ok = True
-        for tok in tokens:
-            if tok not in t:
-                ok = False
-                break
-        if ok:
-            return i + 1
-    return None
+    # unique preserve order
+    out = []
+    for p in hits:
+        if p not in out:
+            out.append(p)
+    return out[:max_hits]
 
-
-def pdf_fallback_find_page_for_event(r: pd.Series,
-                                    page_texts: List[str]) -> Tuple[Optional[int], str]:
-    """
-    Try to find the abstract page in PDF when index has no page.
-    Strategy (first hit wins):
-      1) code
-      2) speaker
-      3) title (first 6~8 words)
-    Return: (page, reason)
-    """
-    if not page_texts:
-        return None, "PDF 未建立文字索引（可能未上傳或缺少 PyMuPDF）"
-
-    code = str(r.get("code") or "").strip()
-    speaker = str(r.get("speaker") or "").strip()
-    title = str(r.get("title") or "").strip()
-
-    # 1) code
-    if code:
-        p = _find_page_in_text_index(page_texts, code)
-        if p:
-            return p, f"用 code 命中：{code}"
-
-    # 2) speaker (trim very long)
-    if speaker:
-        sp = speaker
-        if len(sp) > 80:
-            sp = sp[:80]
-        p = _find_page_in_text_index(page_texts, sp)
-        if p:
-            return p, f"用作者/講者命中：{sp}"
-
-    # 3) title prefix
-    if title:
-        words = _tokenize_query(title)
-        if len(words) >= 6:
-            q = " ".join(words[:8])
-        else:
-            q = title
-        p = _find_page_in_text_index(page_texts, q)
-        if p:
-            return p, "用標題片段命中"
-
-    return None, "找不到（可能是掃描圖 PDF 或 PDF 文字層不含此段）"
 
 # ============================================================
 # Main app
@@ -1297,7 +1141,7 @@ def main():
 
     # --- Auth panel (visible on mobile too) ---
     with st.expander("狀態保存（Google 登入）", expanded=False):
-        user = auth_ui_sidebar()  # renders login link if not yet authenticated
+        user = auth_ui_sidebar()
 
         err = st.session_state.get("auth_error")
         if err:
@@ -1323,62 +1167,68 @@ def main():
 
     # --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
-    st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode", False)))
+
+    # ✅ 預設 mobile mode 開啟
+    st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode", True)))
     st.session_state.setdefault("selected_keys", _as_set(mgr.get("selected_keys", [])))
     st.session_state.setdefault("marked_delete_keys", _as_set(mgr.get("marked_delete_keys", [])))
     st.session_state.setdefault("confirm_delete_marked", bool(mgr.get("confirm_delete_marked", False)))
 
-    # MVP: pdf state
+    # PDF state
     st.session_state.setdefault("pdf_page", int(mgr.get("pdf_page", 1) or 1))
     st.session_state.setdefault("pdf_height", int(mgr.get("pdf_height", 650) or 650))
     st.session_state.setdefault("last_preview_key", str(mgr.get("last_preview_key", "") or ""))
 
-    # MVP: expanded abstract states (do not persist every row; keep session-only)
-    st.session_state.setdefault("_abstract_expand", {})
-
-    # --- Mobile toggle ---
+    # --- Mobile toggle (top right) ---
     tcol1, tcol2 = st.columns([0.75, 0.25])
     with tcol2:
         st.session_state.force_mobile_mode = st.toggle("Mobile mode", value=bool(st.session_state.force_mobile_mode))
     is_mobile = bool(st.session_state.force_mobile_mode)
 
+    # =========================
+    # ✅ 搜尋列與日期選擇：拉到主畫面上方（不放 expander）
+    # =========================
+    top1, top2, top3 = st.columns([0.52, 0.26, 0.22])
+    with top1:
+        query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value=st.session_state.get("q_top", ""))
+    with top2:
+        days = st.multiselect("日期", options=["D1", "D2"], default=st.session_state.get("days_top", ["D1", "D2"]))
+    with top3:
+        include_main = st.checkbox("包含主表（報到/開幕等）", value=bool(st.session_state.get("incl_main_top", True)))
+
+    st.session_state["q_top"] = query
+    st.session_state["days_top"] = days
+    st.session_state["incl_main_top"] = include_main
+
     uploaded = None
     use_default = True
-    query = ""
-    include_main = True
-    days = ["D1", "D2"]
     rooms: List[str] = []
 
-    # MVP controls
-    abs_index_upload = None
+    # PDF inputs
     pdf_upload = None
     pdf_url = ""
     manual_jump_page = None
+    use_default_pdf = True
 
+    # ---- Control panels ----
     if is_mobile:
-        with st.expander("控制面板（檔案/搜尋/篩選/摘要PDF）", expanded=False):
+        with st.expander("控制面板（檔案/篩選/PDF設定）", expanded=False):
             st.markdown("### 輸入議程檔案")
             uploaded = st.file_uploader("上傳 Excel（.xlsx）", type=["xlsx"])
             use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
             st.caption("預設檔案：" + DEFAULT_EXCEL_PATH)
 
             st.markdown("---")
-            st.markdown("### 摘要索引（MVP）")
-            abs_index_upload = st.file_uploader("上傳摘要索引（CSV / Excel）", type=["csv", "xlsx", "xls"])
-            st.caption("索引欄位建議：code / key / page / abstract_text")
-
-            st.markdown("---")
-            st.markdown("### 摘要 PDF（MVP）")
-            pdf_upload = st.file_uploader("上傳摘要集 PDF（可選）", type=["pdf"])
+            st.markdown("### 摘要 PDF（預載）")
+            pdf_upload = st.file_uploader("上傳摘要集 PDF（可選：覆蓋預載）", type=["pdf"])
+            use_default_pdf = st.checkbox("使用預載摘要PDF（已掛載）", value=(pdf_upload is None))
             pdf_url = st.text_input("或填入 PDF URL（可選）", value="")
-            manual_jump_page = st.number_input("手動跳頁（可選）", min_value=1, max_value=5000, value=int(st.session_state["pdf_page"]), step=1)
+            manual_jump_page = st.number_input(
+                "手動跳頁（可選）",
+                min_value=1, max_value=5000,
+                value=int(st.session_state["pdf_page"]), step=1
+            )
             st.session_state["pdf_height"] = st.slider("PDF 顯示高度", min_value=350, max_value=1200, value=int(st.session_state["pdf_height"]), step=50)
-
-            st.markdown("---")
-            st.markdown("### 搜尋與篩選")
-            query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="")
-            include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
-            days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
     else:
         with st.sidebar:
             st.markdown("### 輸入議程檔案")
@@ -1387,22 +1237,16 @@ def main():
             st.caption("預設檔案：" + DEFAULT_EXCEL_PATH)
 
             st.markdown("---")
-            st.markdown("### 摘要索引（MVP）")
-            abs_index_upload = st.file_uploader("上傳摘要索引（CSV / Excel）", type=["csv", "xlsx", "xls"])
-            st.caption("索引欄位建議：code / key / page / abstract_text")
-
-            st.markdown("---")
-            st.markdown("### 摘要 PDF（MVP）")
-            pdf_upload = st.file_uploader("上傳摘要集 PDF（可選）", type=["pdf"])
+            st.markdown("### 摘要 PDF（預載）")
+            pdf_upload = st.file_uploader("上傳摘要集 PDF（可選：覆蓋預載）", type=["pdf"])
+            use_default_pdf = st.checkbox("使用預載摘要PDF（已掛載）", value=(pdf_upload is None))
             pdf_url = st.text_input("或填入 PDF URL（可選）", value="")
-            manual_jump_page = st.number_input("手動跳頁（可選）", min_value=1, max_value=5000, value=int(st.session_state["pdf_page"]), step=1)
+            manual_jump_page = st.number_input(
+                "手動跳頁（可選）",
+                min_value=1, max_value=5000,
+                value=int(st.session_state["pdf_page"]), step=1
+            )
             st.session_state["pdf_height"] = st.slider("PDF 顯示高度", min_value=350, max_value=1200, value=int(st.session_state["pdf_height"]), step=50)
-
-            st.markdown("---")
-            st.markdown("### 搜尋與篩選")
-            query = st.text_input("關鍵字（可輸入多個詞，空格=AND）", value="")
-            include_main = st.checkbox("包含『大會議程』的主表事件（報到/開幕等）", value=True)
-            days = st.multiselect("日期", options=["D1", "D2"], default=["D1", "D2"])
 
     # read master excel
     file_bytes: Optional[bytes] = None
@@ -1432,62 +1276,35 @@ def main():
             rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
 
     # ----------------------------
-    # MVP: load abstract index maps
+    # PDF source: default mounted OR uploaded OR url
     # ----------------------------
-    # Option A: uploaded abstract index
-    abs_df = None
-    if abs_index_upload is not None:
-        try:
-            abs_df = load_abstract_index_from_bytes(abs_index_upload.getvalue(), abs_index_upload.name)
-        except Exception as e:
-            st.error(f"摘要索引讀取失敗：{e}")
-
-    # Option B: if same excel contains a sheet named "摘要索引"
-    if abs_df is None and "摘要索引" in sheets:
-        try:
-            abs_df = _normalize_cols(sheets["摘要索引"])
-            # try to normalize columns similarly
-            rename_map = {}
-            for c in abs_df.columns:
-                cl = str(c).strip().lower()
-                if cl in ("abstract", "摘要", "摘要內容", "內容"):
-                    rename_map[c] = "abstract_text"
-                if cl in ("page", "頁碼", "頁", "p"):
-                    rename_map[c] = "page"
-                if cl in ("code", "編號"):
-                    rename_map[c] = "code"
-                if cl in ("key", "event_key"):
-                    rename_map[c] = "key"
-            if rename_map:
-                abs_df = abs_df.rename(columns=rename_map)
-        except Exception:
-            abs_df = None
-
-    by_code, by_key = build_abstract_maps(abs_df) if abs_df is not None else ({}, {})
-
-    # ----------------------------
-    # MVP: PDF source
-    # ----------------------------
-    pdf_data_uri = None
-    pdf_page_texts: List[str] = []
-    
+    pdf_bytes: Optional[bytes] = None
     if pdf_upload is not None:
-        try:
-            _pdf_bytes = pdf_upload.getvalue()
-            pdf_data_uri = make_pdf_data_uri(_pdf_bytes)
-    
-            # v2.4: build text index for fallback search (only if PyMuPDF is available)
-            if _PDF_TEXT_OK:
-                pdf_page_texts = _pdf_build_page_text_index(_pdf_bytes)
-            else:
-                pdf_page_texts = []
-    
-        except Exception as e:
-            st.error(f"PDF 上傳處理失敗：{e}")
-            pdf_data_uri = None
-            pdf_page_texts = []
+        pdf_bytes = pdf_upload.getvalue()
+    else:
+        if use_default_pdf:
+            try:
+                with open(DEFAULT_ABSTRACT_PDF_PATH, "rb") as f:
+                    pdf_bytes = f.read()
+            except Exception:
+                pdf_bytes = None
 
-    # allow manual jump page
+    pdf_data_uri: Optional[str] = None
+    if pdf_bytes is not None:
+        try:
+            pdf_data_uri = make_pdf_data_uri_cached(pdf_bytes)
+        except Exception as e:
+            st.warning(f"預載 PDF 轉換失敗（仍可用 URL 方式）：{e}")
+            pdf_data_uri = None
+
+    # Extract PDF text pages for searching
+    pdf_pages_text: List[str] = []
+    if pdf_bytes is not None and _PDF_READER_OK:
+        try:
+            pdf_pages_text = extract_pdf_text_pages(pdf_bytes)
+        except Exception:
+            pdf_pages_text = []
+
     if manual_jump_page is not None:
         st.session_state["pdf_page"] = int(manual_jump_page)
 
@@ -1501,26 +1318,37 @@ def main():
     df_hit2 = mark_conflict_with_selected(df_hit, selected_df)
 
     # ----------------------------
-    # MVP: PDF Viewer panel (always available if pdf is provided)
+    # 0) PDF Viewer panel
     # ----------------------------
     st.subheader("0) 摘要 PDF（跳頁預覽）")
-    st.caption("你可以用搜尋結果的「📄 跳到 PDF」自動定位頁碼；或在側邊手動輸入頁碼。")
+    st.caption("你可以在搜尋結果中按「🔎 找摘要/跳頁」，用『報告編號或人名』去 PDF 內找可能頁碼（不做 OCR）。")
 
     pdf_src = build_pdf_src(pdf_url=pdf_url, pdf_data_uri=pdf_data_uri, page=int(st.session_state["pdf_page"]))
     if pdf_src is None:
-        st.info("尚未提供 PDF：請在側邊上傳摘要集 PDF 或填入 PDF URL（MVP）。")
+        st.info("尚未提供 PDF：請在側邊勾選預載摘要 PDF、上傳 PDF 或填入 PDF URL。")
     else:
         st.markdown(pdf_iframe_html(pdf_src, height=int(st.session_state["pdf_height"])), unsafe_allow_html=True)
+
+    # small PDF search diagnostics
+    if pdf_bytes is None:
+        st.caption("PDF：未載入")
+    else:
+        if _PDF_READER_OK and pdf_pages_text:
+            st.caption(f"PDF：已載入（{len(pdf_pages_text)} pages 可搜尋）")
+        else:
+            if not _PDF_READER_OK:
+                st.caption("PDF：已載入（⚠️ 缺少 PyPDF2，無法做頁內文字搜尋）")
+            else:
+                st.caption("PDF：已載入（⚠️ 但未抽到可用文字；可能是掃描圖，MVP 不做 OCR）")
 
     st.markdown("---")
 
     # ----------------------------
     # 1) 搜尋結果
     # ----------------------------
-    st.subheader("1) 搜尋結果（加入／移除個人行事曆）＋摘要（MVP）")
+    st.subheader("1) 搜尋結果（加入／移除個人行事曆）＋PDF 跳頁")
     st.caption(f"符合筆數：{len(df_hit2)}（⚠️ 表示會與你已選的『非海報』行程時間重疊；海報不標衝突）")
 
-    # Helper: render a single card with MVP buttons (for mobile, and also used in desktop detail view)
     def render_event_card(r: pd.Series, allow_add_remove: bool = True, compact: bool = False):
         k = str(r["key"])
         picked = (k in selected_keys)
@@ -1531,11 +1359,6 @@ def main():
         title = str(r.get("title") or "").strip()
         who = str(r.get("speaker") or "").strip()
         where = str(r.get("room") or "").strip()
-
-        # abstract payload
-        abs_payload = resolve_abstract_for_event(r, by_code, by_key)
-        abs_page = abs_payload.get("page", None)
-        abs_text = str(abs_payload.get("abstract_text", "") or "").strip()
 
         st.markdown(f"**{r['day']} · {r['start']}–{r['end']} · {where}**")
         if code:
@@ -1548,7 +1371,8 @@ def main():
             st.caption("（Poster：不顯示衝突⚠️，也不計入衝突統計）")
 
         # controls row
-        c1, c2, c3, c4 = st.columns([0.20, 0.20, 0.30, 0.30])
+        c1, c2, c3, c4 = st.columns([0.20, 0.26, 0.26, 0.28])
+
         with c1:
             if allow_add_remove:
                 if picked:
@@ -1564,63 +1388,55 @@ def main():
                         selected_keys.add(k)
                         st.session_state["selected_keys"] = selected_keys
                         st.rerun()
+
         with c2:
-            # expand abstract toggle
-            exp_state = st.session_state["_abstract_expand"].get(k, False)
-            label = "收合摘要" if exp_state else "展開摘要"
-            if st.button(label, key=f"abs_{k}"):
-                st.session_state["_abstract_expand"][k] = (not exp_state)
+            # find pages in pdf by code/name
+            if st.button("🔎 找摘要/跳頁", key=f"find_{k}"):
+                pages = find_pdf_pages_for_code_or_name(
+                    pdf_pages_text=pdf_pages_text,
+                    code=code,
+                    name=who,
+                    max_hits=8,
+                )
+                st.session_state.setdefault("_pdf_hits", {})
+                st.session_state["_pdf_hits"][k] = pages
+                if pages:
+                    st.session_state["pdf_page"] = int(pages[0])
+                st.session_state["last_preview_key"] = k
                 st.rerun()
+
         with c3:
-            # v2.4: jump to pdf by abstract page if available, else fallback search within PDF text
-            if abs_page and isinstance(abs_page, int) and abs_page > 0:
-                if st.button(f"📄 跳到第 {abs_page} 頁", key=f"pdf_{k}"):
-                    st.session_state["pdf_page"] = int(abs_page)
+            pages = []
+            if isinstance(st.session_state.get("_pdf_hits", {}).get(k, None), list):
+                pages = st.session_state["_pdf_hits"][k]
+            if pages:
+                pick = st.selectbox("候選頁", options=pages, index=0, key=f"pagesel_{k}")
+                if st.button("前往", key=f"goto_{k}"):
+                    st.session_state["pdf_page"] = int(pick)
                     st.session_state["last_preview_key"] = k
                     st.rerun()
             else:
-                # fallback button (only meaningful if pdf_page_texts exists)
-                if st.button("🔍 從 PDF 找頁", key=f"pdf_find_{k}"):
-                    p, reason = pdf_fallback_find_page_for_event(r, pdf_page_texts)
-                    if p and isinstance(p, int) and p > 0:
-                        st.session_state["pdf_page"] = int(p)
-                        st.session_state["last_preview_key"] = k
-                        st.toast(f"已定位到第 {p} 頁｜{reason}")
-                        st.rerun()
-                    else:
-                        st.warning(f"找不到頁碼：{reason}")
+                st.caption("候選頁：—")
+
         with c4:
-            # optional manual jump with number input per card (lightweight)
-            if compact:
-                st.caption("")
-            else:
-                guess = abs_page if (abs_page and isinstance(abs_page, int) and abs_page > 0) else int(st.session_state["pdf_page"])
-                jp = st.number_input("跳頁", min_value=1, max_value=5000, value=int(guess), step=1, key=f"jp_{k}")
-                if st.button("前往", key=f"go_{k}"):
+            if not compact:
+                guess = int(st.session_state["pdf_page"])
+                jp = st.number_input("手動跳頁", min_value=1, max_value=5000, value=int(guess), step=1, key=f"jp_{k}")
+                if st.button("前往手動", key=f"go_{k}"):
                     st.session_state["pdf_page"] = int(jp)
                     st.session_state["last_preview_key"] = k
                     st.rerun()
 
-        # expanded abstract body
-        if st.session_state["_abstract_expand"].get(k, False):
-            st.markdown('<div class="hr-soft"></div>', unsafe_allow_html=True)
-            if abs_text:
-                st.markdown("**Abstract**")
-                st.write(abs_text)
-            else:
-                st.info("（尚無摘要索引：請上傳摘要索引 CSV/Excel，或在同一 Excel 新增「摘要索引」分頁）")
-
-            # show matched info
-            meta = []
-            if abs_page:
-                meta.append(f"page={abs_page}")
-            if code:
-                meta.append(f"code={code}")
-            meta.append(f"key={k[:30]}…")
-            st.caption(" · ".join(meta))
+        # show small reason / tips
+        if not pdf_pages_text and pdf_bytes is not None and _PDF_READER_OK:
+            st.caption("提示：目前抽不到 PDF 文字（可能是掃描圖），『找摘要』會找不到；你仍可用手動跳頁。")
+        elif pdf_bytes is None:
+            st.caption("提示：尚未載入 PDF；請先在側邊勾選預載或上傳 PDF。")
+        elif not _PDF_READER_OK:
+            st.caption("提示：缺少 PyPDF2；部署環境需在 requirements.txt 加入 PyPDF2 才能做頁內搜尋。")
 
     if not is_mobile:
-        # --- Desktop: keep your original data_editor selection ---
+        # --- Desktop: keep data_editor selection ---
         picker_df = df_for_picker(df_hit2, selected_keys, show_conflict_with_selected=True)
 
         edited = st.data_editor(
@@ -1668,31 +1484,27 @@ def main():
         with c3:
             st.caption("提示：你可以先用關鍵字或教室篩選縮小範圍，再全選。")
 
-        # --- Desktop MVP: detail viewer with expand abstract + jump to pdf ---
+        # detail viewer with pdf search
         st.markdown("---")
-        st.subheader("1.5) 結果詳情（MVP：展開摘要／PDF跳頁）")
-        st.caption("Desktop 的 data_editor 不適合逐列按鈕，所以這裡用『選一筆 → 展開摘要/跳頁』來對應「被選到的那個」。")
-
+        st.subheader("1.5) 結果詳情（PDF 找摘要/跳頁）")
         if len(df_hit2) == 0:
             st.info("目前沒有搜尋結果。")
         else:
-            # build labels
             labels = []
             keys = []
             for _, r in df_hit2.head(300).iterrows():
-                k = str(r["key"])
+                kk = str(r["key"])
                 code = str(r.get("code") or "").strip()
                 title = str(r.get("title") or "").strip()
                 lab = f"{r['day']} {r['start']}-{r['end']} | {r['room']} | {code+' | ' if code else ''}{title[:60]}"
                 labels.append(lab)
-                keys.append(k)
+                keys.append(kk)
 
-            # default selection: last preview key if present in current results
             default_idx = 0
             if st.session_state["last_preview_key"] in keys:
                 default_idx = keys.index(st.session_state["last_preview_key"])
 
-            pick = st.selectbox("選一筆查看摘要/跳頁", options=list(range(len(labels))), format_func=lambda i: labels[i], index=default_idx)
+            pick = st.selectbox("選一筆查看/跳頁", options=list(range(len(labels))), format_func=lambda i: labels[i], index=default_idx)
             picked_key = keys[int(pick)]
             st.session_state["last_preview_key"] = picked_key
 
@@ -1701,7 +1513,7 @@ def main():
                 render_event_card(rsel, allow_add_remove=True, compact=True)
 
     else:
-        # --- Mobile: per-card controls, includes abstract + pdf jump ---
+        # --- Mobile: per-card controls ---
         n_total = int(len(df_hit2))
         if n_total == 0:
             st.warning("沒有符合的結果：請放寬關鍵字/日期/教室篩選。")
@@ -1846,7 +1658,6 @@ def main():
     mgr.set("selected_keys", sorted(list(set(map(str, st.session_state["selected_keys"])))))
     mgr.set("marked_delete_keys", sorted(list(set(map(str, st.session_state["marked_delete_keys"])))))
     mgr.set("confirm_delete_marked", bool(st.session_state["confirm_delete_marked"]))
-    # MVP: persist pdf page + last preview
     mgr.set("pdf_page", int(st.session_state.get("pdf_page", 1) or 1))
     mgr.set("pdf_height", int(st.session_state.get("pdf_height", 650) or 650))
     mgr.set("last_preview_key", str(st.session_state.get("last_preview_key", "") or ""))
