@@ -1122,12 +1122,6 @@ def main():
 
         st.markdown("---")
         st.caption("🔒 登入僅用於記住你勾選的議程，不讀 Gmail、不改 Google Calendar。")
-
-    query = ""
-    include_main = True
-    days = ["D1", "D2"]
-    rooms: List[str] = []
-
     # ✅ 搜尋欄：獨立區塊（放在登入之後）
     st.markdown("### 🔎 搜尋")
     qcol1, qcol2, qcol3 = st.columns([0.62, 0.22, 0.16])
@@ -1143,9 +1137,6 @@ def main():
     
     st.markdown("---")
 
-    
-    
-    
     # --- Persistent state manager ---
     mgr = UserStateManager(st.session_state.get("auth_user"))
     st.session_state.setdefault("force_mobile_mode", bool(mgr.get("force_mobile_mode",True)))
@@ -1159,10 +1150,8 @@ def main():
         st.session_state.force_mobile_mode = st.toggle("Mobile mode", value=bool(st.session_state.force_mobile_mode))
     is_mobile = bool(st.session_state.force_mobile_mode)
 
-    
-
     # --- Abstract PDF panel (pre-mounted) ---
-    with st.expander("摘要集 PDF（掛載）", expanded=not is_mobile):
+    with st.expander("摘要集 PDF（預先掛載）", expanded=not is_mobile):
         st.caption(f"預設路徑：`{DEFAULT_ABSTRACT_PDF_PATH}`（請把 PDF 放在 repo 的 data/ 目錄）")
         if not _PDF_LIBS_OK:
             st.warning("尚未安裝 pymupdf（import fitz 失敗）。請在 requirements.txt 加上 `pymupdf`。")
@@ -1189,7 +1178,7 @@ def main():
     rooms: List[str] = []
 
     if is_mobile:
-        with st.expander("議程檔案 (掛載)", expanded=False):
+        with st.expander("控制面板（檔案/搜尋/篩選）", expanded=False):
             st.markdown("### 輸入議程檔案")
             uploaded = st.file_uploader("上傳 Excel（.xlsx）", type=["xlsx"])
             use_default = st.checkbox("使用預設檔案路徑（已掛載）", value=(uploaded is None))
@@ -1217,19 +1206,8 @@ def main():
         st.info("請上傳 Excel 檔，或勾選使用預設檔案。")
         st.stop()
 
-    # ⬇⬇⬇ 這裡「完全不要多縮排」
     sheets = load_excel_all_sheets(file_bytes)
     df_all = build_master_df(sheets)
-
-    # ✅ 場地 / 分會場篩選（往上移）
-    all_rooms = sorted(df_all["room"].dropna().unique().tolist())
-    if is_mobile:
-        with st.expander("教室/分會場篩選（可選）", expanded=False):
-            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
-    else:
-        with st.sidebar:
-            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
-
 
     # ✅ 在這裡把摘要頁碼回填進 df_all（依 code）
     code2page: Dict[str, int] = {}
@@ -1241,7 +1219,13 @@ def main():
             code2page = {}
     df_all = attach_abstract_page(df_all, code2page)
 
-    
+    all_rooms = sorted(df_all["room"].dropna().unique().tolist())
+    if is_mobile:
+        with st.expander("教室/分會場篩選（可選）", expanded=False):
+            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
+    else:
+        with st.sidebar:
+            rooms = st.multiselect("教室/分會場", options=all_rooms, default=[])
 
     selected_keys: Set[str] = set(st.session_state["selected_keys"])
     marked_delete: Set[str] = set(st.session_state["marked_delete_keys"])
